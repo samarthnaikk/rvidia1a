@@ -5,6 +5,7 @@ export default {
     extend: {
       fontFamily: {
         space: ['"Space Grotesk"', 'sans-serif'],
+        jetbrains: ['"JetBrains Mono"', 'monospace'],
       },
     },
   },
