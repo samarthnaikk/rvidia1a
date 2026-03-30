@@ -5,6 +5,7 @@ import json
 import platform
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -14,6 +15,10 @@ from typing import Any
 from urllib import error, request
 
 import iroh
+try:
+    import psutil
+except ImportError:  # pragma: no cover - exercised when dependency is unavailable
+    psutil = None  # type: ignore[assignment]
 
 from app.core.rvidia_core import RvidiaNode, WorkspaceManager
 
@@ -22,6 +27,12 @@ DEFAULT_API_BASE = "http://157.180.74.2"
 DEFAULT_WORKSPACE = "./.p2p-workspaces"
 
 _RECONNECT_INTERVAL = 5  # seconds between reconnect attempts
+
+
+def _ensure_directory(path: Path) -> None:
+    if path.exists() and not path.is_dir():
+        path.unlink()
+    path.mkdir(parents=True, exist_ok=True)
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -137,53 +148,261 @@ async def _wait_for_access_accepted(api_base: str, token: str, job_id: str) -> N
         await asyncio.sleep(2)
 
 
-# ── GPU Detection ─────────────────────────────────────────────────────────────
+# Hardware Passport Detection
 
-def _detect_gpu() -> dict[str, str | None]:
-    """Detect GPU details via nvidia-smi. Falls back gracefully on missing GPU."""
-    try:
-        import subprocess
-        result = subprocess.run(
+
+class HardwareInspector:
+    """Cross-platform host hardware detection and scoring."""
+
+    def __init__(self) -> None:
+        self.os_name = platform.system()
+
+    def _run(self, command: list[str], timeout: int = 10) -> str:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+
+    def _safe_int(self, value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _clamp(self, value: float) -> float:
+        if value < 0:
+            return 0.0
+        if value > 100:
+            return 100.0
+        return round(value, 2)
+
+    def _keyword_score(self, name: str | None, tiers: list[tuple[str, float]]) -> float:
+        if not name:
+            return 0.0
+        lowered = name.lower()
+        for key, score in tiers:
+            if key in lowered:
+                return score
+        return 0.0
+
+    def _ram_mb(self) -> int | None:
+        if psutil is None:
+            return None
+        try:
+            return int(psutil.virtual_memory().total / (1024 * 1024))
+        except Exception:
+            return None
+
+    def _detect_windows(self) -> dict[str, object]:
+        cpu_model = None
+        cpu_cores = None
+        cpu_clock_mhz = None
+        gpu_model = None
+        gpu_vram_mb = None
+        gpu_driver = None
+
+        cpu_data = self._run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Processor | Select-Object -First 1 Name,NumberOfCores,MaxClockSpeed | ConvertTo-Json -Compress",
+            ]
+        )
+        if cpu_data:
+            try:
+                parsed = json.loads(cpu_data)
+                cpu_model = parsed.get("Name")
+                cpu_cores = self._safe_int(parsed.get("NumberOfCores"))
+                cpu_clock_mhz = self._safe_int(parsed.get("MaxClockSpeed"))
+            except json.JSONDecodeError:
+                pass
+
+        nvidia = self._run(
             [
                 "nvidia-smi",
                 "--query-gpu=name,memory.total,driver_version",
                 "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
+            ]
         )
-        if result.returncode == 0:
-            parts = [p.strip() for p in result.stdout.strip().split(",")]
+        if nvidia:
+            parts = [p.strip() for p in nvidia.split(",")]
             if len(parts) >= 3:
-                return {
-                    "gpu_model": parts[0],
-                    "gpu_vram": f"{parts[1]} MiB",
-                    "gpu_driver": parts[2],
-                }
-    except Exception:
-        pass
+                gpu_model = parts[0] or None
+                gpu_vram_mb = self._safe_int(parts[1])
+                gpu_driver = parts[2] or None
+        else:
+            gpu_data = self._run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -First 1 Name,AdapterRAM,DriverVersion | ConvertTo-Json -Compress",
+                ]
+            )
+            if gpu_data:
+                try:
+                    parsed = json.loads(gpu_data)
+                    gpu_model = parsed.get("Name")
+                    adapter_ram = self._safe_int(parsed.get("AdapterRAM"))
+                    gpu_vram_mb = int(adapter_ram / (1024 * 1024)) if adapter_ram else None
+                    gpu_driver = parsed.get("DriverVersion")
+                except json.JSONDecodeError:
+                    pass
 
-    try:
-        import pynvml  # type: ignore[import]
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        name = pynvml.nvmlDeviceGetName(handle)
-        if isinstance(name, bytes):
-            name = name.decode()
-        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        driver = pynvml.nvmlSystemGetDriverVersion()
-        if isinstance(driver, bytes):
-            driver = driver.decode()
         return {
-            "gpu_model": name,
-            "gpu_vram": f"{mem.total // 1024 // 1024} MiB",
-            "gpu_driver": driver,
+            "cpu_model": cpu_model,
+            "cpu_physical_cores": cpu_cores,
+            "cpu_max_clock_mhz": cpu_clock_mhz,
+            "gpu_model": gpu_model,
+            "gpu_vram_mb": gpu_vram_mb,
+            "gpu_driver": gpu_driver,
         }
-    except Exception:
-        pass
 
-    return {"gpu_model": None, "gpu_vram": None, "gpu_driver": None}
+    def _detect_macos(self, ram_mb: int | None) -> dict[str, object]:
+        cpu_model = self._run(["sysctl", "-n", "machdep.cpu.brand_string"]) or None
+        cpu_cores = self._safe_int(self._run(["sysctl", "-n", "hw.physicalcpu"]))
+        cpu_clock_hz = self._safe_int(self._run(["sysctl", "-n", "hw.cpufrequency"]))
+        cpu_clock_mhz = int(cpu_clock_hz / 1_000_000) if cpu_clock_hz else None
+        gpu_model = None
+        gpu_vram_mb = None
+
+        gpu_json = self._run(["system_profiler", "SPDisplaysDataType", "-json"])
+        if gpu_json:
+            try:
+                parsed = json.loads(gpu_json)
+                displays = parsed.get("SPDisplaysDataType", [])
+                if isinstance(displays, list) and displays:
+                    first = displays[0]
+                    gpu_model = first.get("sppci_model") or first.get("_name")
+                    vram_raw = first.get("spdisplays_vram") or first.get("spdisplays_vram_shared")
+                    if isinstance(vram_raw, str):
+                        digits = "".join(ch for ch in vram_raw if ch.isdigit())
+                        if digits:
+                            vram_int = int(digits)
+                            gpu_vram_mb = vram_int * 1024 if "gb" in vram_raw.lower() else vram_int
+            except json.JSONDecodeError:
+                pass
+
+        is_apple_silicon = bool(cpu_model and "apple" in cpu_model.lower() and "m" in cpu_model.lower())
+        if is_apple_silicon and ram_mb is not None:
+            gpu_vram_mb = int(ram_mb * 0.5)
+
+        return {
+            "cpu_model": cpu_model,
+            "cpu_physical_cores": cpu_cores,
+            "cpu_max_clock_mhz": cpu_clock_mhz,
+            "gpu_model": gpu_model,
+            "gpu_vram_mb": gpu_vram_mb,
+            "gpu_driver": None,
+        }
+
+    def _cpu_score(self, cpu_model: str | None, cpu_cores: int | None, cpu_clock_mhz: int | None) -> float:
+        tiers = [
+            ("i9-14", 95),
+            ("i9", 88),
+            ("i7", 78),
+            ("ryzen 9", 90),
+            ("ryzen 7", 80),
+            ("m4 max", 92),
+            ("m4 pro", 88),
+            ("m3 max", 84),
+            ("m2 max", 76),
+            ("m1", 40),
+        ]
+        score = self._keyword_score(cpu_model, tiers)
+        score += min(20.0, float(cpu_cores or 0) * 1.5)
+        score += min(10.0, float(cpu_clock_mhz or 0) / 600.0)
+        return self._clamp(score)
+
+    def _gpu_score(self, gpu_model: str | None, gpu_vram_mb: int | None) -> float:
+        tiers = [
+            ("rtx 4090", 100),
+            ("rtx 4080", 92),
+            ("rtx 4070", 84),
+            ("rtx 3090", 90),
+            ("a100", 98),
+            ("h100", 100),
+            ("m4 max", 86),
+            ("m3 max", 78),
+            ("m2", 64),
+            ("m1", 40),
+            ("iris xe", 32),
+        ]
+        score = self._keyword_score(gpu_model, tiers)
+        score += min(20.0, float(gpu_vram_mb or 0) / 1024.0)
+        return self._clamp(score)
+
+    def _ram_score(self, ram_mb: int | None) -> float:
+        if ram_mb is None:
+            return 0.0
+        return self._clamp(min(100.0, float(ram_mb) / 512.0))
+
+    def get_specs(self) -> dict[str, object]:
+        ram_mb = self._ram_mb()
+        if self.os_name == "Windows":
+            detected = self._detect_windows()
+        elif self.os_name == "Darwin":
+            detected = self._detect_macos(ram_mb=ram_mb)
+        else:
+            detected = {
+                "cpu_model": platform.processor() or platform.platform(),
+                "cpu_physical_cores": self._safe_int(psutil.cpu_count(logical=False) if psutil else None),
+                "cpu_max_clock_mhz": None,
+                "gpu_model": None,
+                "gpu_vram_mb": None,
+                "gpu_driver": None,
+            }
+
+        cpu_score = self._cpu_score(
+            cpu_model=detected.get("cpu_model"),  # type: ignore[arg-type]
+            cpu_cores=detected.get("cpu_physical_cores"),  # type: ignore[arg-type]
+            cpu_clock_mhz=detected.get("cpu_max_clock_mhz"),  # type: ignore[arg-type]
+        )
+        gpu_score = self._gpu_score(
+            gpu_model=detected.get("gpu_model"),  # type: ignore[arg-type]
+            gpu_vram_mb=detected.get("gpu_vram_mb"),  # type: ignore[arg-type]
+        )
+        ram_score = self._ram_score(ram_mb=ram_mb)
+        total_score = self._clamp((0.35 * cpu_score) + (0.55 * gpu_score) + (0.10 * ram_score))
+
+        return {
+            "os": self.os_name,
+            "cpu_model": detected.get("cpu_model"),
+            "cpu_physical_cores": detected.get("cpu_physical_cores"),
+            "cpu_max_clock_mhz": detected.get("cpu_max_clock_mhz"),
+            "gpu_model": detected.get("gpu_model"),
+            "gpu_vram_mb": detected.get("gpu_vram_mb"),
+            "gpu_driver": detected.get("gpu_driver"),
+            "ram_mb": ram_mb,
+            "cpu_score": cpu_score,
+            "gpu_score": gpu_score,
+            "ram_score": ram_score,
+            "total_score": total_score,
+            "scoring_version": "passport-v1",
+        }
+
+
+def _detect_gpu() -> dict[str, str | None]:
+    specs = HardwareInspector().get_specs()
+    gpu_vram_mb = specs.get("gpu_vram_mb")
+    gpu_vram = f"{gpu_vram_mb} MiB" if isinstance(gpu_vram_mb, int) else None
+    return {
+        "gpu_model": specs.get("gpu_model"),  # type: ignore[return-value]
+        "gpu_vram": gpu_vram,
+        "gpu_driver": specs.get("gpu_driver"),  # type: ignore[return-value]
+    }
 
 
 def _is_gpu_runtime_unavailable(stderr_or_logs: str) -> bool:
@@ -327,7 +546,7 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
 
     # Ensure destination directory exists and use absolute path (fixes IrohError).
     abs_output_path = Path(output_path).resolve()
-    abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(abs_output_path.parent)
     print(f"[RVIDIA] Writing artifact to: {abs_output_path}")
 
     if abs_output_path.exists():
@@ -354,7 +573,7 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
         # Strategy 2: write to a Linux-native temp dir, then copy to requested destination.
         # This avoids iroh FFI failures on /mnt/c/... paths in WSL.
         tmp_dir = Path(tempfile.gettempdir()) / "rvidia-iroh" / str(uuid.uuid4())
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(tmp_dir)
         tmp_path = tmp_dir / (abs_output_path.name or "artifact.bin")
 
         try:
@@ -366,7 +585,7 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
             ) from tmp_error
 
         # Copy from temp to the requested destination.
-        abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(abs_output_path.parent)
         try:
             shutil.copy2(str(tmp_path), str(abs_output_path))
             print(f"[RVIDIA] Artifact copied from temp '{tmp_path}' to '{abs_output_path}'.")
@@ -435,10 +654,10 @@ async def _host_execute_docker(
 ) -> None:
     """Clone repo, docker build+run inside /outputs volume, ship artifacts back."""
     workspace_dir = Path(args.workspace) / args.job_id
-    workspace_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(workspace_dir)
 
     outputs_dir = workspace_dir / "outputs"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(outputs_dir)
 
     _api_patch(
         args.api_base,
@@ -686,8 +905,16 @@ async def run_host(args):
     node = RvidiaNode(workspace)
     node_id = await node.initialize(secret_key=args.secret_key)
 
-    gpu_info = _detect_gpu()
+    hardware_metadata = HardwareInspector().get_specs()
+    gpu_vram_mb = hardware_metadata.get("gpu_vram_mb")
+    gpu_info = {
+        "gpu_model": hardware_metadata.get("gpu_model"),
+        "gpu_vram": f"{gpu_vram_mb} MiB" if isinstance(gpu_vram_mb, int) else None,
+        "gpu_driver": hardware_metadata.get("gpu_driver"),
+    }
+    print(f"[RVIDIA] CPU: {hardware_metadata.get('cpu_model') or 'unknown'}")
     print(f"[RVIDIA] GPU: {gpu_info.get('gpu_model') or 'not detected'}")
+    print(f"[RVIDIA] Passport score: {hardware_metadata.get('total_score')}")
 
     legacy_access_mode = False
     try:
@@ -716,7 +943,12 @@ async def run_host(args):
 
     if (not legacy_access_mode) and (not bool(state.get("is_owner"))):
         if bool(args.request_access) and str(state.get("access_status") or "") == "open":
-            _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/request-access", args.token, {})
+            _api_post(
+                args.api_base,
+                f"/p2p/jobs/{args.job_id}/request-access",
+                args.token,
+                {"hardware_metadata": hardware_metadata},
+            )
             print("[RVIDIA] Access requested; waiting for owner acceptance...")
         await _wait_for_access_accepted(args.api_base, args.token, args.job_id)
 
@@ -861,7 +1093,7 @@ async def run_receiver(args):
     success = bool(result.get("success"))
 
     output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(output_dir)
 
     # Download all artifact files.
     artifact_tickets: list[dict] = result.get("artifact_tickets") or []
@@ -881,7 +1113,7 @@ async def run_receiver(args):
     print(f"[RVIDIA] Received result_ticket: transfer_id={transfer_id}, {len(artifact_tickets)} artifact(s): {artifact_names}")
 
     output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(output_dir)
     print(f"[RVIDIA] Saving artifacts to: {output_dir}")
 
     _DOWNLOAD_RETRIES = 3
@@ -957,12 +1189,22 @@ async def run_receiver(args):
 
 
 async def run_request_access(args):
-    payload = _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/request-access", args.token, {})
+    payload = _api_post(
+        args.api_base,
+        f"/p2p/jobs/{args.job_id}/request-access",
+        args.token,
+        {"hardware_metadata": HardwareInspector().get_specs()},
+    )
     print(json.dumps(payload, indent=2))
 
 
 async def run_accept_access(args):
-    payload = _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/accept-access", args.token, {})
+    payload = _api_post(
+        args.api_base,
+        f"/p2p/jobs/{args.job_id}/accept-access",
+        args.token,
+        {"requester_user_id": args.requester_user_id},
+    )
     print(json.dumps(payload, indent=2))
 
 
@@ -1000,6 +1242,12 @@ def build_parser() -> argparse.ArgumentParser:
     request_access.set_defaults(handler=run_request_access)
 
     accept_access = subparsers.add_parser("accept-access", parents=[common], help="Accept an access request for your job")
+    accept_access.add_argument(
+        "--requester-user-id",
+        type=int,
+        default=None,
+        help="Specific requester user id to accept (default: oldest pending request)",
+    )
     accept_access.set_defaults(handler=run_accept_access)
 
     return parser

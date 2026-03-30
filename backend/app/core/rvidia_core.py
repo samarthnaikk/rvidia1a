@@ -17,6 +17,12 @@ _DEFAULT_CHUNK_SIZE = 64 * 1024
 _ALPN = b"rvidia/v1"
 
 
+def _ensure_directory(path: Path) -> None:
+    if path.exists() and not path.is_dir():
+        path.unlink()
+    path.mkdir(parents=True, exist_ok=True)
+
+
 class WorkspaceManager:
     """Manage isolated task workspaces with reconnect-aware lifecycle controls."""
 
@@ -27,7 +33,7 @@ class WorkspaceManager:
             requested_base_dir = Path(f"{requested_base_dir}.dir")
 
         self.base_dir = requested_base_dir
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(self.base_dir)
         self.reconnect_window_seconds = reconnect_window_seconds
         self._sessions: dict[str, Path] = {}
         self._disconnect_deadlines: dict[str, float] = {}
@@ -207,7 +213,7 @@ class RvidiaNode:
 
             file_name = str(start.get("filename") or Path(path).name)
             destination = await self._resolve_receive_destination(file_name=file_name, path=path, task_id=task_id)
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_directory(destination.parent)
 
             with destination.open("wb") as handle:
                 while True:
@@ -327,7 +333,7 @@ class RvidiaNode:
         output_path: Path | None = None
         if bool(completion.get("has_artifact")):
             artifact_base = Path(artifact_dir)
-            artifact_base.mkdir(parents=True, exist_ok=True)
+            _ensure_directory(artifact_base)
             output_path = await self.transfer_data(
                 stream,
                 path=artifact_base / "artifact.bin",

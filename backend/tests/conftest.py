@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models import job, p2p_signal, user  # noqa: F401 — register models
+from app.models import job, p2p_access_request, p2p_signal, user  # noqa: F401 - register models
 
 
 @pytest.fixture(scope="function")
@@ -17,3 +17,4 @@ def db_session():
     yield session
     session.close()
     Base.metadata.drop_all(bind=engine)
+

@@ -10,3 +10,4 @@ google-auth
 python-dotenv
 requests
 iroh==0.31.0
+psutil

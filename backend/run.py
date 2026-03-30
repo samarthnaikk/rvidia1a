@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.core.database import Base, engine
-from app.models import job, p2p_signal, user
+from app.models import job, p2p_access_request, p2p_signal, user
 from app.routes import auth, jobs, p2p
 
 
@@ -49,9 +49,38 @@ def ensure_p2p_signals_schema() -> None:
             connection.execute(text(statement))
 
 
+def ensure_p2p_access_requests_schema() -> None:
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS p2p_access_requests (
+            id VARCHAR PRIMARY KEY,
+            job_id VARCHAR NOT NULL,
+            requester_user_id INTEGER NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'requested',
+            hardware_metadata TEXT,
+            cpu_model VARCHAR,
+            gpu_model VARCHAR,
+            gpu_vram_mb INTEGER,
+            ram_mb INTEGER,
+            total_score DOUBLE PRECISION,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_p2p_access_requests_job_id ON p2p_access_requests (job_id)",
+        "CREATE INDEX IF NOT EXISTS ix_p2p_access_requests_requester ON p2p_access_requests (requester_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_p2p_access_requests_status ON p2p_access_requests (status)",
+        "CREATE INDEX IF NOT EXISTS ix_p2p_access_requests_total_score ON p2p_access_requests (total_score)",
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
 Base.metadata.create_all(bind=engine)
 ensure_jobs_schema()
 ensure_p2p_signals_schema()
+ensure_p2p_access_requests_schema()
 
 app = FastAPI()
 
