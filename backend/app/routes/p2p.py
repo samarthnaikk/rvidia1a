@@ -8,6 +8,7 @@ from app.routes.auth import get_current_user
 from app.schemas.job import (
     JobCompletionRequest,
     JobUpdateStatusRequest,
+    RegisterHostRequest,
     RegisterNodeRequest,
     SignalAnswerRequest,
     SignalCandidateRequest,
@@ -41,15 +42,165 @@ def _queue_signal(job_id: str, signal: dict) -> None:
     _SIGNALS[job_id].append(signal)
 
 
-@router.post("/jobs/{job_id}/register-host")
-def register_host(
+def _is_owner(job: Job, user: User) -> bool:
+    return job.user_id == user.id
+
+
+def _is_requester(job: Job, user: User) -> bool:
+    return job.access_requested_by is not None and job.access_requested_by == user.id
+
+
+def _ensure_participant_access(job: Job, user: User) -> None:
+    if _is_owner(job, user):
+        return
+    if _is_requester(job, user) and job.access_status == "accepted":
+        return
+    raise HTTPException(status_code=403, detail="Access not granted for this job")
+
+
+def _marketplace_view(job: Job, current_user: User) -> dict:
+    owner = _is_owner(job, current_user)
+    requester = _is_requester(job, current_user)
+    return {
+        "job_id": job.id,
+        "user_id": job.user_id,
+        "repo_url": job.repo_url,
+        "branch": job.branch,
+        "status": job.status,
+        "access_status": job.access_status,
+        "created_at": job.created_at.isoformat(),
+        "gpu_model": job.gpu_model,
+        "gpu_vram": job.gpu_vram,
+        "gpu_driver": job.gpu_driver,
+        "can_request": (not owner) and job.access_status == "open",
+        "can_accept": owner and job.access_status == "requested",
+        "is_owner": owner,
+        "is_requester": requester,
+    }
+
+
+# ── Marketplace endpoints ─────────────────────────────────────────────────────
+
+@router.get("/hosts")
+def list_hosts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return jobs that have a registered host, including GPU metadata."""
+    jobs = (
+        db.query(Job)
+        .filter(Job.host_node_id.isnot(None))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "job_id": j.id,
+            "host_node_id": j.host_node_id,
+            "status": j.status,
+            "gpu_model": j.gpu_model,
+            "gpu_vram": j.gpu_vram,
+            "gpu_driver": j.gpu_driver,
+            "access_status": j.access_status,
+        }
+        for j in jobs
+    ]
+
+
+@router.get("/jobs")
+def list_marketplace_jobs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return pending jobs with repo metadata for host browsing."""
+    jobs = db.query(Job).order_by(Job.created_at.desc()).all()
+    visible: list[dict] = []
+    for job in jobs:
+        owner = _is_owner(job, current_user)
+        requester = _is_requester(job, current_user)
+        if job.access_status == "open":
+            visible.append(_marketplace_view(job, current_user))
+            continue
+        if owner or requester:
+            visible.append(_marketplace_view(job, current_user))
+    return visible
+
+
+@router.get("/jobs/{job_id}/access")
+def get_access_state(
     job_id: str,
-    payload: RegisterNodeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     job = _get_job(job_id, db)
+    owner = _is_owner(job, current_user)
+    requester = _is_requester(job, current_user)
+    if not owner and not requester and job.access_status != "open":
+        raise HTTPException(status_code=403, detail="Access state is private")
+    return _marketplace_view(job, current_user)
+
+
+@router.post("/jobs/{job_id}/request-access")
+def request_access(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Renter signals intent to use a host's registered job slot."""
+    job = _get_job(job_id, db)
+    if _is_owner(job, current_user):
+        raise HTTPException(status_code=400, detail="Job owner cannot request access to own job")
+    if job.access_status != "open":
+        raise HTTPException(status_code=409, detail=f"Job access is already '{job.access_status}'")
+    job.access_status = "requested"
+    job.access_requested_by = current_user.id
+    db.commit()
+    db.refresh(job)
+    return {"job_id": job.id, "access_status": job.access_status, "requested_by": current_user.id}
+
+
+@router.post("/jobs/{job_id}/accept-access")
+def accept_access(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Host owner accepts the renter's request; CLI connect string is now active."""
+    job = _get_job_for_user(job_id, current_user.id, db)
+    if job.access_status != "requested":
+        raise HTTPException(status_code=409, detail=f"No pending access request on job '{job_id}'")
+    job.access_status = "accepted"
+    job.status = "ready_for_transfer"
+    db.commit()
+    db.refresh(job)
+    return {
+        "job_id": job.id,
+        "access_status": job.access_status,
+        "status": job.status,
+        "host_node_id": job.host_node_id,
+        "receiver_node_id": job.receiver_node_id,
+    }
+
+
+# ── Node registration ─────────────────────────────────────────────────────────
+
+@router.post("/jobs/{job_id}/register-host")
+def register_host(
+    job_id: str,
+    payload: RegisterHostRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = _get_job(job_id, db)
+    if not _is_owner(job, current_user) and not _is_requester(job, current_user):
+        raise HTTPException(status_code=403, detail="Only job participants can register as host")
     job.host_node_id = payload.node_id
+    if payload.gpu_model is not None:
+        job.gpu_model = payload.gpu_model
+    if payload.gpu_vram is not None:
+        job.gpu_vram = payload.gpu_vram
+    if payload.gpu_driver is not None:
+        job.gpu_driver = payload.gpu_driver
     if job.status == "queued":
         job.status = "awaiting_receiver"
     db.commit()
@@ -65,6 +216,8 @@ def register_receiver(
     current_user: User = Depends(get_current_user),
 ):
     job = _get_job_for_user(job_id, current_user.id, db)
+    if job.access_status != "accepted":
+        raise HTTPException(status_code=409, detail="Access must be accepted before receiver can register")
     job.receiver_node_id = payload.node_id
     if job.host_node_id:
         job.status = "ready_for_transfer"
@@ -84,7 +237,8 @@ def get_job_peers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    job = _get_job_for_user(job_id, current_user.id, db)
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     return {
         "job_id": job.id,
         "host_node_id": job.host_node_id,
@@ -94,6 +248,8 @@ def get_job_peers(
     }
 
 
+# ── Signaling ─────────────────────────────────────────────────────────────────
+
 @router.post("/jobs/{job_id}/offer")
 def push_offer(
     job_id: str,
@@ -101,7 +257,8 @@ def push_offer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job(job_id, db)
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     _queue_signal(
         job_id,
         {
@@ -121,7 +278,8 @@ def push_answer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job(job_id, db)
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     _queue_signal(
         job_id,
         {
@@ -141,7 +299,8 @@ def push_candidate(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job(job_id, db)
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     _queue_signal(
         job_id,
         {
@@ -161,7 +320,8 @@ def pull_signals(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job(job_id, db)
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     queue = _SIGNALS.get(job_id, [])
     deliver: list[dict] = []
     remaining: list[dict] = []
@@ -181,8 +341,8 @@ def p2p_update_job_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _ = current_user
     job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     job.status = payload.status
     job.error_message = payload.error_message
     db.commit()
@@ -201,8 +361,8 @@ def p2p_complete_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _ = current_user
     job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     job.status = "completed" if payload.success else "failed"
     job.artifact_name = payload.artifact_name
     job.artifact_path = payload.artifact_path

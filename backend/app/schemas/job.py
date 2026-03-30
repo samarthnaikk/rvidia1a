@@ -4,8 +4,11 @@ from pydantic import BaseModel
 
 
 class JobCreateRequest(BaseModel):
-    filename: str
-    command: str
+    repo_url: str
+    branch: str = "main"
+    # Legacy fields kept for backwards compatibility; unused in Docker mode.
+    filename: str = ""
+    command: str = ""
 
 
 class JobUpdateStatusRequest(BaseModel):
@@ -25,9 +28,16 @@ class JobResponse(BaseModel):
     user_id: int
     filename: str
     command: str
+    repo_url: str | None
+    branch: str
     status: str
     host_node_id: str | None
     receiver_node_id: str | None
+    gpu_model: str | None
+    gpu_vram: str | None
+    gpu_driver: str | None
+    access_status: str
+    access_requested_by: int | None
     artifact_name: str | None
     artifact_path: str | None
     error_message: str | None
@@ -40,6 +50,13 @@ class JobResponse(BaseModel):
 
 class RegisterNodeRequest(BaseModel):
     node_id: str
+
+
+class RegisterHostRequest(BaseModel):
+    node_id: str
+    gpu_model: str | None = None
+    gpu_vram: str | None = None
+    gpu_driver: str | None = None
 
 
 class SignalOfferRequest(BaseModel):

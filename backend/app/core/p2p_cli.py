@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ from app.core.rvidia_core import RvidiaNode, WorkspaceManager
 
 
 DEFAULT_API_BASE = "http://157.180.74.2"
+
+_RECONNECT_INTERVAL = 5  # seconds between reconnect attempts
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -34,12 +37,12 @@ def _build_api_url(api_base: str, path: str, with_api_prefix: bool = False) -> s
     return f"{base}{normalized_path}"
 
 
-def _api_request(method: str, api_base: str, path: str, token: str, payload: dict | None = None) -> dict:
+def _api_request(method: str, api_base: str, path: str, token: str, payload: dict | None = None) -> Any:
     encoded_body = None
     if payload is not None:
         encoded_body = json.dumps(payload).encode("utf-8")
 
-    def _perform(url: str) -> bytes:
+    def _perform(url: str) -> tuple[bytes, str]:
         req = request.Request(
             url=url,
             method=method,
@@ -47,18 +50,21 @@ def _api_request(method: str, api_base: str, path: str, token: str, payload: dic
             data=encoded_body,
         )
         with request.urlopen(req, timeout=30) as response:
-            return response.read()
+            return response.read(), response.headers.get("Content-Type", "")
 
     primary_url = _build_api_url(api_base, path, with_api_prefix=False)
+    used_url = primary_url
+    content_type = ""
 
     try:
-        raw = _perform(primary_url)
+        raw, content_type = _perform(primary_url)
     except error.HTTPError as exc:
         if exc.code == 404:
             fallback_url = _build_api_url(api_base, path, with_api_prefix=True)
             if fallback_url != primary_url:
                 try:
-                    raw = _perform(fallback_url)
+                    used_url = fallback_url
+                    raw, content_type = _perform(fallback_url)
                 except error.HTTPError as fallback_exc:
                     details = fallback_exc.read().decode("utf-8", errors="replace")
                     raise RuntimeError(f"API error {fallback_exc.code}: {details}") from fallback_exc
@@ -75,173 +81,106 @@ def _api_request(method: str, api_base: str, path: str, token: str, payload: dic
 
     if not raw:
         return {}
-    return json.loads(raw.decode("utf-8"))
+
+    body_text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(body_text)
+    except json.JSONDecodeError as exc:
+        compact = " ".join(body_text.split())
+        snippet = compact[:220]
+        hint = ""
+        if "text/html" in content_type.lower() or body_text.lstrip().startswith("<"):
+            hint = " Hint: this looks like an HTML page. Check --api-base points to backend (e.g. http://localhost:8000)."
+        raise RuntimeError(
+            f"API returned non-JSON response from {used_url} (Content-Type: {content_type or 'unknown'}). "
+            f"Body preview: {snippet!r}.{hint}"
+        ) from exc
 
 
-def _api_post(api_base: str, path: str, token: str, payload: dict) -> dict:
+def _api_post(api_base: str, path: str, token: str, payload: dict) -> Any:
     return _api_request("POST", api_base, path, token, payload)
 
 
-def _api_patch(api_base: str, path: str, token: str, payload: dict) -> dict:
+def _api_patch(api_base: str, path: str, token: str, payload: dict) -> Any:
     return _api_request("PATCH", api_base, path, token, payload)
 
 
-def _api_get(api_base: str, path: str, token: str) -> dict:
+def _api_get(api_base: str, path: str, token: str) -> Any:
     return _api_request("GET", api_base, path, token)
 
 
-async def _call_any(obj: Any, names: list[str], *args: Any) -> Any:
-    for name in names:
-        fn = getattr(obj, name, None)
-        if not callable(fn):
-            continue
-
-        call_variants = [args]
-        if len(args) >= 1:
-            call_variants.append(args[:1])
-        call_variants.append(())
-
-        for variant in call_variants:
-            try:
-                value = fn(*variant)
-                if inspect.isawaitable(value):
-                    value = await value
-                return value
-            except TypeError:
-                continue
-
-    available = [name for name in dir(obj) if not name.startswith("_") and callable(getattr(obj, name, None))]
-    raise RuntimeError(
-        f"No callable method found from: {', '.join(names)}. "
-        f"Available callables on {type(obj).__name__}: {', '.join(sorted(available))}"
-    )
+def _list_marketplace_jobs(api_base: str, token: str) -> list[dict[str, Any]]:
+    payload = _api_get(api_base, "/p2p/jobs", token)
+    return payload if isinstance(payload, list) else []
 
 
-def _endpoint_variants(endpoint: Any) -> list[Any]:
-    variants = [endpoint]
-    for attr in ("endpoint", "node"):
-        candidate = getattr(endpoint, attr, None)
-        if candidate is None:
-            continue
-        if callable(candidate):
-            try:
-                candidate = candidate()
-            except TypeError:
-                continue
-        if candidate is not None:
-            variants.append(candidate)
-    return variants
+def _get_access_state(api_base: str, token: str, job_id: str) -> dict[str, Any]:
+    payload = _api_get(api_base, f"/p2p/jobs/{job_id}/access", token)
+    return payload if isinstance(payload, dict) else {}
 
 
-async def _candidate_to_stream(candidate: Any, role: str) -> Any:
-    if candidate is None:
-        raise RuntimeError("P2P stream candidate is None")
-
-    if any(hasattr(candidate, attr) for attr in ("read", "read_exact", "readexactly")) and any(
-        hasattr(candidate, attr) for attr in ("write", "write_all", "send")
-    ):
-        return candidate
-
-    method_groups: list[list[str]]
-    if role == "host":
-        method_groups = [
-            ["accept_bi", "accept_stream", "accept_bidirectional", "accept"],
-            ["open_bi", "open_stream", "open_bidirectional"],
-        ]
-    else:
-        method_groups = [
-            ["open_bi", "open_stream", "open_bidirectional", "connect_bi"],
-            ["accept_bi", "accept_stream", "accept_bidirectional", "accept"],
-        ]
-
-    for names in method_groups:
-        for try_args in ((),):
-            try:
-                maybe_stream = await _call_any(candidate, names, *try_args)
-            except RuntimeError:
-                continue
-            if maybe_stream is not None:
-                return maybe_stream
-
-    for attr in ("stream", "bi_stream", "channel"):
-        nested = getattr(candidate, attr, None)
-        if nested is not None:
-            if callable(nested):
-                nested = nested()
-                if inspect.isawaitable(nested):
-                    nested = await nested
-            if nested is not None:
-                return nested
-
-    raise RuntimeError(f"Unable to extract usable stream from {type(candidate).__name__}")
+async def _wait_for_access_accepted(api_base: str, token: str, job_id: str) -> None:
+    while True:
+        state = _get_access_state(api_base, token, job_id)
+        status = str(state.get("access_status") or "")
+        if status == "accepted":
+            return
+        if status == "open":
+            raise RuntimeError("Access request is still open; requester must call request-access first")
+        print(f"[RVIDIA] Waiting for access acceptance (current: {status or 'unknown'})...")
+        await asyncio.sleep(2)
 
 
-async def _accept_stream(endpoint: Any, alpn: bytes) -> Any:
-    for variant in _endpoint_variants(endpoint):
-        try:
-            candidate = await _call_any(
-                variant,
-                [
-                    "accept",
-                    "accept_bi",
-                    "accept_stream",
-                    "accept_bidirectional",
-                    "accept_connection",
-                    "accept_conn",
-                    "incoming",
-                    "listen",
-                ],
-                alpn,
-            )
-        except RuntimeError:
-            continue
+# ── GPU Detection ─────────────────────────────────────────────────────────────
 
-        if hasattr(candidate, "__anext__"):
-            candidate = await candidate.__anext__()
-        elif hasattr(candidate, "__aiter__"):
-            async for item in candidate:
-                candidate = item
-                break
+def _detect_gpu() -> dict[str, str | None]:
+    """Detect GPU details via nvidia-smi. Falls back gracefully on missing GPU."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(",")]
+            if len(parts) >= 3:
+                return {
+                    "gpu_model": parts[0],
+                    "gpu_vram": f"{parts[1]} MiB",
+                    "gpu_driver": parts[2],
+                }
+    except Exception:
+        pass
 
-        return await _candidate_to_stream(candidate, role="host")
+    try:
+        import pynvml  # type: ignore[import]
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        name = pynvml.nvmlDeviceGetName(handle)
+        if isinstance(name, bytes):
+            name = name.decode()
+        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        driver = pynvml.nvmlSystemGetDriverVersion()
+        if isinstance(driver, bytes):
+            driver = driver.decode()
+        return {
+            "gpu_model": name,
+            "gpu_vram": f"{mem.total // 1024 // 1024} MiB",
+            "gpu_driver": driver,
+        }
+    except Exception:
+        pass
 
-    raise RuntimeError("Unable to accept iroh stream from endpoint; no compatible accept/listen API found")
+    return {"gpu_model": None, "gpu_vram": None, "gpu_driver": None}
 
 
-def _has_incoming_api(endpoint: Any) -> bool:
-    incoming_names = {
-        "accept",
-        "accept_bi",
-        "accept_stream",
-        "accept_bidirectional",
-        "accept_connection",
-        "accept_conn",
-        "incoming",
-        "listen",
-    }
-    for variant in _endpoint_variants(endpoint):
-        for name in incoming_names:
-            if callable(getattr(variant, name, None)):
-                return True
-    return False
-
-
-async def _connect_stream(endpoint: Any, node_id: str, alpn: bytes) -> Any:
-    for variant in _endpoint_variants(endpoint):
-        try:
-            candidate = await _call_any(
-                variant,
-                ["connect", "connect_bi", "open_stream", "open_bidirectional", "dial"],
-                node_id,
-                alpn,
-            )
-        except RuntimeError:
-            continue
-
-        return await _candidate_to_stream(candidate, role="receiver")
-
-    raise RuntimeError("Unable to connect iroh stream; no compatible connect API found")
-
+# ── Docker helpers ────────────────────────────────────────────────────────────
 
 async def _run_command_with_logs(command: str, cwd: Path):
     proc = await asyncio.create_subprocess_shell(
@@ -266,6 +205,23 @@ async def _run_command_with_logs(command: str, cwd: Path):
 
     return proc, lines(), captured
 
+
+def _docker_container_running(container_name: str) -> bool:
+    """Check if a named Docker container is still running."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format={{.State.Running}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
+# ── iroh helpers ──────────────────────────────────────────────────────────────
 
 class _DownloadCallback:
     async def progress(self, _progress):
@@ -294,18 +250,33 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
     blobs: Any = _blobs_from_node(node)
     ticket = iroh.BlobTicket(ticket_str)
     await blobs.download(ticket.hash(), ticket.as_download_options(), _DownloadCallback())
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # iroh write may fail if target already exists; remove stale targets first.
-    if output_path.exists():
-        output_path.unlink()
+    # Ensure destination directory exists and use absolute path (fixes IrohError).
+    abs_output_path = Path(output_path).resolve()
+    abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if abs_output_path.exists():
+        abs_output_path.unlink()
 
     try:
-        await blobs.write_to_path(ticket.hash(), str(output_path))
-        return output_path
+        await blobs.write_to_path(ticket.hash(), str(abs_output_path))
+        return abs_output_path
     except Exception as primary_error:
-        fallback_path = output_path.with_name(
-            f"{output_path.stem}-{int(time.time())}{output_path.suffix}"
+        # Log directory permissions to stderr to aid debugging IrohError.
+        parent = abs_output_path.parent
+        import stat as _stat
+        try:
+            mode = oct(_stat.S_IMODE(parent.stat().st_mode))
+        except Exception:
+            mode = "unknown"
+        print(
+            f"[RVIDIA] IrohError writing to '{abs_output_path}'. "
+            f"Parent dir '{parent}' permissions: {mode}",
+            file=sys.stderr,
+        )
+
+        fallback_path = abs_output_path.with_name(
+            f"{abs_output_path.stem}-{int(time.time())}{abs_output_path.suffix}"
         )
         if fallback_path.exists():
             fallback_path.unlink()
@@ -314,10 +285,12 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
             return fallback_path
         except Exception as fallback_error:
             raise RuntimeError(
-                f"Failed to write downloaded ticket to '{output_path}' or fallback '{fallback_path}': "
+                f"Failed to write downloaded ticket to '{abs_output_path}' or fallback '{fallback_path}': "
                 f"{primary_error} | {fallback_error}"
             ) from fallback_error
 
+
+# ── Signaling ─────────────────────────────────────────────────────────────────
 
 def _push_signal(
     api_base: str,
@@ -359,36 +332,23 @@ def _pull_signals(api_base: str, token: str, job_id: str, node_id: str) -> list[
     return parsed
 
 
-async def run_host(args):
-    workspace = WorkspaceManager(args.workspace)
-    node = RvidiaNode(workspace)
-    node_id = await node.initialize(secret_key=args.secret_key)
+# ── Host logic ────────────────────────────────────────────────────────────────
 
-    _api_post(
-        args.api_base,
-        f"/p2p/jobs/{args.job_id}/register-host",
-        args.token,
-        {"node_id": node_id},
-    )
-    print(f"HOST_NODE_ID={node_id}")
-    print("Host waiting for renter ticket signal...")
+async def _host_execute_docker(
+    args,
+    node: RvidiaNode,
+    node_id: str,
+    receiver_node_id: str,
+    repo_url: str,
+    branch: str,
+    docker_args: str,
+) -> None:
+    """Clone repo, docker build+run inside /outputs volume, ship artifacts back."""
+    workspace_dir = Path(args.workspace) / args.job_id
+    workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    incoming: dict[str, Any] | None = None
-    while incoming is None:
-        for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
-            if signal.get("type") == "input_ticket":
-                incoming = signal
-                break
-        if incoming is None:
-            await asyncio.sleep(2)
-
-    receiver_node_id = str(incoming.get("from_node_id") or "")
-    input_ticket = str(incoming.get("input_ticket") or "")
-    input_filename = str(incoming.get("filename") or "input.bin")
-    command_template = str(incoming.get("command") or "")
-
-    if not receiver_node_id or not input_ticket or not command_template:
-        raise RuntimeError("Invalid input_ticket signal payload")
+    outputs_dir = workspace_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
 
     _api_patch(
         args.api_base,
@@ -397,59 +357,95 @@ async def run_host(args):
         {"status": "running", "error_message": None},
     )
 
-    workspace_dir = Path(args.workspace) / args.job_id
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    received_file = await _download_ticket_to_path(node, input_ticket, workspace_dir / input_filename)
+    # 1. Clone the repository.
+    repo_dir = workspace_dir / "repo"
+    if repo_dir.exists():
+        import shutil
+        shutil.rmtree(repo_dir)
 
-    preexisting_files = {
-        file_path.resolve()
-        for file_path in workspace_dir.rglob("*")
-        if file_path.is_file()
-    }
-    execution_started_at = time.time()
+    clone_cmd = f"git clone --depth=1 --branch {branch} {repo_url} repo"
+    print(f"[RVIDIA] Cloning {repo_url} (branch: {branch})...")
+    clone_proc, clone_logs, clone_captured = await _run_command_with_logs(clone_cmd, workspace_dir)
+    async for line in clone_logs:
+        print(f"[git] {line}")
+    clone_rc = await clone_proc.wait()
+    if clone_rc != 0:
+        raise RuntimeError(f"git clone failed (exit {clone_rc}): {' '.join(clone_captured[-5:])}")
 
-    command = command_template.replace("{input}", received_file.name)
-    print(f"Executing command for task {args.job_id}: {command}")
-    proc, log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
-    return_code = await proc.wait()
+    image_tag = f"task_{args.job_id[:12]}"
 
-    # Drain the async stdout iterator so captured_lines includes print output.
-    async for _ in log_source:
-        pass
+    # 2. Docker build.
+    print(f"[RVIDIA] Building Docker image '{image_tag}'...")
+    build_cmd = f"docker build -t {image_tag} ."
+    build_proc, build_logs, build_captured = await _run_command_with_logs(build_cmd, repo_dir)
+    async for line in build_logs:
+        print(f"[docker build] {line}")
+    build_rc = await build_proc.wait()
+    if build_rc != 0:
+        raise RuntimeError(f"docker build failed (exit {build_rc}): {' '.join(build_captured[-5:])}")
 
-    output_lines = list(captured_lines)
-    if not output_lines:
-        output_lines = [
-            f"Command produced no stdout/stderr: {command}",
-            f"Exit code: {return_code}",
-        ]
+    # 3. Docker run — GPU pass-through, /outputs volume, extra docker_args.
+    abs_outputs = str(outputs_dir.resolve())
+    extra = docker_args.strip() if docker_args else ""
+    def _build_run_cmd(use_gpu: bool) -> str:
+        gpu_segment = "--gpus all " if use_gpu else ""
+        return (
+            f"docker run --rm {gpu_segment}"
+            f"-v {abs_outputs}:/outputs "
+            f"{extra} "
+            f"{image_tag}"
+        ).strip()
 
+    print(f"[RVIDIA] Running container '{image_tag}'...")
+    run_rc = 1
+    run_captured: list[str] = []
+
+    # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
+    gpu_first = _build_run_cmd(use_gpu=True)
+    run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
+    async for line in run_logs:
+        print(f"[docker run] {line}")
+    run_rc = await run_proc.wait()
+
+    if run_rc != 0:
+        combined = "\n".join(run_captured).lower()
+        gpu_unavailable = "could not select device driver" in combined or "capabilities: [[gpu]]" in combined
+        if gpu_unavailable:
+            print("[RVIDIA] Docker GPU runtime unavailable; retrying container without GPU flags.")
+            cpu_fallback = _build_run_cmd(use_gpu=False)
+            cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(cpu_fallback, workspace_dir)
+            async for line in cpu_logs:
+                print(f"[docker run] {line}")
+            run_rc = await cpu_proc.wait()
+            run_captured.extend(["", "[CPU FALLBACK]"] + cpu_captured)
+
+    # 4. Write execution log.
     logs_file = workspace_dir / "execution.log"
-    logs_file.write_text("\n".join(output_lines), encoding="utf-8")
+    logs_file.write_text(
+        "\n".join(run_captured) or f"Container exited with code {run_rc}",
+        encoding="utf-8",
+    )
 
-    artifact: Path | None = None
-    generated_artifacts: list[Path] = []
-    for file_path in workspace_dir.rglob("*"):
-        if not file_path.is_file():
-            continue
-        resolved = file_path.resolve()
-        if resolved == received_file.resolve() or resolved == logs_file.resolve():
-            continue
-        if resolved in preexisting_files and file_path.stat().st_mtime < execution_started_at:
-            continue
-        generated_artifacts.append(file_path)
+    # 5. Collect all files from outputs/, plus the log.
+    output_files: list[Path] = [f for f in outputs_dir.rglob("*") if f.is_file()]
+    if not output_files:
+        # Fall back: write stdout to an artifact so receiver always gets something.
+        fallback = outputs_dir / "artifact.txt"
+        fallback.write_text(
+            "\n".join(run_captured) or f"Container exited with code {run_rc}",
+            encoding="utf-8",
+        )
+        output_files = [fallback]
 
-    if generated_artifacts:
-        generated_artifacts.sort(key=lambda item: item.stat().st_mtime, reverse=True)
-        artifact = generated_artifacts[0]
-    else:
-        artifact = workspace_dir / "artifact.txt"
-        artifact.write_text("\n".join(output_lines), encoding="utf-8")
+    # 6. Share each output file as an iroh ticket and push signal.
+    artifact_tickets: list[dict[str, str]] = []
+    for out_file in output_files:
+        ticket_str = await _share_file_ticket(node, out_file)
+        artifact_tickets.append({"name": out_file.name, "ticket": ticket_str})
 
-    artifact_ticket = await _share_file_ticket(node, artifact)
     logs_ticket = await _share_file_ticket(node, logs_file)
+    success = run_rc == 0
 
-    success = return_code == 0
     _push_signal(
         api_base=args.api_base,
         token=args.token,
@@ -459,10 +455,12 @@ async def run_host(args):
         message={
             "type": "result_ticket",
             "success": success,
-            "artifact_ticket": artifact_ticket,
-            "artifact_name": artifact.name,
+            "artifact_tickets": artifact_tickets,
+            # Legacy single-artifact fields for backwards compat.
+            "artifact_ticket": artifact_tickets[0]["ticket"] if artifact_tickets else "",
+            "artifact_name": artifact_tickets[0]["name"] if artifact_tickets else "",
             "logs_ticket": logs_ticket,
-            "error_message": None if success else f"Command exited with code {return_code}",
+            "error_message": None if success else f"Container exited with code {run_rc}",
         },
     )
 
@@ -472,26 +470,140 @@ async def run_host(args):
         args.token,
         {
             "success": success,
-            "artifact_name": artifact.name,
-            "artifact_path": str(artifact),
-            "error_message": None if success else f"Command exited with code {return_code}",
+            "artifact_name": artifact_tickets[0]["name"] if artifact_tickets else None,
+            "artifact_path": str(output_files[0]) if output_files else None,
+            "error_message": None if success else f"Container exited with code {run_rc}",
         },
     )
 
-    print("Host execution completed.")
+    print(f"[RVIDIA] Host execution completed (exit code {run_rc}).")
 
+
+async def run_host(args):
+    workspace = WorkspaceManager(args.workspace)
+    node = RvidiaNode(workspace)
+    node_id = await node.initialize(secret_key=args.secret_key)
+
+    gpu_info = _detect_gpu()
+    print(f"[RVIDIA] GPU: {gpu_info.get('gpu_model') or 'not detected'}")
+
+    legacy_access_mode = False
+    try:
+        state = _get_access_state(args.api_base, args.token, args.job_id)
+    except RuntimeError as exc:
+        details = str(exc)
+        if '"detail":"Not Found"' in details or '"detail": "Not Found"' in details:
+            legacy_access_mode = True
+            state = {}
+            print(
+                "[RVIDIA] Access-handshake endpoints are unavailable on target backend; using legacy host flow.",
+                file=sys.stderr,
+            )
+        elif "API error 404" in details:
+            try:
+                jobs = _list_marketplace_jobs(args.api_base, args.token)
+            except RuntimeError:
+                jobs = []
+            known_ids = [str(j.get("job_id")) for j in jobs if j.get("job_id")]
+            msg = f"Job '{args.job_id}' was not found."
+            if known_ids:
+                msg += f" Available marketplace jobs: {', '.join(known_ids[:10])}"
+            raise RuntimeError(msg) from exc
+        else:
+            raise
+
+    if (not legacy_access_mode) and (not bool(state.get("is_owner"))):
+        if bool(args.request_access) and str(state.get("access_status") or "") == "open":
+            _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/request-access", args.token, {})
+            print("[RVIDIA] Access requested; waiting for owner acceptance...")
+        await _wait_for_access_accepted(args.api_base, args.token, args.job_id)
+
+    try:
+        _api_post(
+            args.api_base,
+            f"/p2p/jobs/{args.job_id}/register-host",
+            args.token,
+            {"node_id": node_id, **gpu_info},
+        )
+    except RuntimeError as exc:
+        if "Job not found" in str(exc):
+            raise RuntimeError(
+                f"Job '{args.job_id}' was not found on {args.api_base}. "
+                "Use the job ID from the same backend environment and account token."
+            ) from exc
+        raise
+    print(f"HOST_NODE_ID={node_id}")
+    print("[RVIDIA] Host waiting for renter repo signal...")
+
+    # Heartbeat/reconnect loop — outer loop retries on network drop.
+    running_container: str | None = None
+
+    while True:
+        try:
+            incoming: dict[str, Any] | None = None
+            while incoming is None:
+                # Re-attachment: skip if Docker container is still running.
+                if running_container and _docker_container_running(running_container):
+                    print(f"[RVIDIA] Container '{running_container}' still running, waiting...")
+                    await asyncio.sleep(5)
+                    continue
+
+                for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
+                    if signal.get("type") == "input_ticket":
+                        incoming = signal
+                        break
+                if incoming is None:
+                    await asyncio.sleep(2)
+
+            receiver_node_id = str(incoming.get("from_node_id") or "")
+            repo_url = str(incoming.get("repo_url") or "")
+            branch = str(incoming.get("branch") or "main")
+            docker_args = str(incoming.get("docker_args") or "")
+
+            if not receiver_node_id or not repo_url:
+                raise RuntimeError("Invalid input_ticket signal: missing receiver_node_id or repo_url")
+
+            image_tag = f"task_{args.job_id[:12]}"
+            running_container = image_tag
+
+            await _host_execute_docker(
+                args=args,
+                node=node,
+                node_id=node_id,
+                receiver_node_id=receiver_node_id,
+                repo_url=repo_url,
+                branch=branch,
+                docker_args=docker_args,
+            )
+            running_container = None
+            break  # Job done — exit loop.
+
+        except (RuntimeError, OSError) as exc:
+            print(f"[RVIDIA] Connection/execution error: {exc}. Reconnecting in {_RECONNECT_INTERVAL}s...", file=sys.stderr)
+            await asyncio.sleep(_RECONNECT_INTERVAL)
+
+
+# ── Receiver logic ────────────────────────────────────────────────────────────
 
 async def run_receiver(args):
     workspace = WorkspaceManager(args.workspace)
     node = RvidiaNode(workspace)
     node_id = await node.initialize(secret_key=args.secret_key)
 
-    _api_post(
-        args.api_base,
-        f"/p2p/jobs/{args.job_id}/register-receiver",
-        args.token,
-        {"node_id": node_id},
-    )
+    try:
+        _api_post(
+            args.api_base,
+            f"/p2p/jobs/{args.job_id}/register-receiver",
+            args.token,
+            {"node_id": node_id},
+        )
+    except RuntimeError as exc:
+        if "Access must be accepted" in str(exc):
+            raise RuntimeError(
+                "Receiver cannot start yet: access is not accepted. "
+                "Owner must run: python -m app.core.p2p_cli accept-access --api-base ... --token ... --job-id ..."
+            ) from exc
+        raise
     print(f"RECEIVER_NODE_ID={node_id}")
 
     host_node_id = args.host_node_id
@@ -499,7 +611,7 @@ async def run_receiver(args):
         peers = _api_get(args.api_base, f"/p2p/jobs/{args.job_id}/peers", args.token)
         host_node_id = peers.get("host_node_id")
         if not host_node_id:
-            print("Waiting for host registration...")
+            print("[RVIDIA] Waiting for host registration...")
             await asyncio.sleep(2)
 
     if node.endpoint is None:
@@ -507,13 +619,11 @@ async def run_receiver(args):
 
     _api_patch(
         args.api_base,
-        f"/jobs/{args.job_id}/status",
+        f"/p2p/jobs/{args.job_id}/status",
         args.token,
         {"status": "transferring", "error_message": None},
     )
 
-    input_path = Path(args.file_path)
-    input_ticket = await _share_file_ticket(node, input_path)
     _push_signal(
         api_base=args.api_base,
         token=args.token,
@@ -522,11 +632,12 @@ async def run_receiver(args):
         to_node_id=host_node_id,
         message={
             "type": "input_ticket",
-            "input_ticket": input_ticket,
-            "filename": input_path.name,
-            "command": args.command,
+            "repo_url": args.repo_url,
+            "branch": args.branch,
+            "docker_args": getattr(args, "docker_args", "") or "",
         },
     )
+    print(f"[RVIDIA] Sent repo signal to host: {args.repo_url} (branch: {args.branch})")
 
     result: dict[str, Any] | None = None
     while result is None:
@@ -537,17 +648,28 @@ async def run_receiver(args):
         if result is None:
             await asyncio.sleep(2)
 
-    artifact_ticket = str(result.get("artifact_ticket") or "")
     logs_ticket = str(result.get("logs_ticket") or "")
     success = bool(result.get("success"))
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    artifact_path: Path | None = None
-    if artifact_ticket:
-        artifact_name = str(result.get("artifact_name") or "artifact.txt")
-        artifact_path = await _download_ticket_to_path(node, artifact_ticket, output_dir / artifact_name)
+    # Download all artifact files.
+    artifact_tickets: list[dict] = result.get("artifact_tickets") or []
+    if not artifact_tickets and result.get("artifact_ticket"):
+        # Legacy single-artifact path.
+        artifact_tickets = [
+            {"name": str(result.get("artifact_name") or "artifact.txt"), "ticket": str(result["artifact_ticket"])}
+        ]
+
+    saved_paths: list[Path] = []
+    for entry in artifact_tickets:
+        ticket_str = entry.get("ticket", "")
+        name = entry.get("name", "artifact.bin")
+        if ticket_str:
+            path = await _download_ticket_to_path(node, ticket_str, output_dir / name)
+            saved_paths.append(path)
+            print(f"[RVIDIA] Artifact saved: {path}")
 
     if logs_ticket:
         logs_path = await _download_ticket_to_path(node, logs_ticket, output_dir / "execution.log")
@@ -556,23 +678,33 @@ async def run_receiver(args):
 
     _api_post(
         args.api_base,
-        f"/jobs/{args.job_id}/complete",
+        f"/p2p/jobs/{args.job_id}/complete",
         args.token,
         {
             "success": success,
-            "artifact_name": artifact_path.name if artifact_path else None,
-            "artifact_path": str(artifact_path) if artifact_path else None,
+            "artifact_name": saved_paths[0].name if saved_paths else None,
+            "artifact_path": str(saved_paths[0]) if saved_paths else None,
             "error_message": None if success else str(result.get("error_message") or "Remote execution failed"),
         },
     )
 
-    print(f"Receiver completed task {args.job_id}.")
-    if artifact_path:
-        print(f"Artifact saved at: {artifact_path}")
+    print(f"[RVIDIA] Receiver completed task {args.job_id}.")
 
+
+async def run_request_access(args):
+    payload = _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/request-access", args.token, {})
+    print(json.dumps(payload, indent=2))
+
+
+async def run_accept_access(args):
+    payload = _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/accept-access", args.token, {})
+    print(json.dumps(payload, indent=2))
+
+
+# ── CLI parser ────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Rvidia MVP P2P host/receiver CLI")
+    parser = argparse.ArgumentParser(description="RVIDIA P2P host/receiver CLI")
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -582,15 +714,28 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--workspace", default="./.p2p-workspaces", help="Local workspace root")
     common.add_argument("--secret-key", default=None, help="Optional iroh secret key")
 
-    host = subparsers.add_parser("host", parents=[common], help="Start host and execute incoming job")
+    host = subparsers.add_parser("host", parents=[common], help="Start host and execute incoming Docker job")
+    host.add_argument(
+        "--request-access",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Request access before host registration when job is not owned by this user",
+    )
     host.set_defaults(handler=run_host)
 
-    receiver = subparsers.add_parser("receiver", parents=[common], help="Start receiver and send task to host")
+    receiver = subparsers.add_parser("receiver", parents=[common], help="Submit a GitHub repo job to a remote host")
     receiver.add_argument("--host-node-id", default="", help="Host node ID (optional if host already registered)")
-    receiver.add_argument("--file-path", required=True, help="Path to input file to send via P2P")
-    receiver.add_argument("--command", required=True, help="Execution command on host; supports {input} placeholder")
-    receiver.add_argument("--output-dir", default="./outputs", help="Directory to write returned artifact")
+    receiver.add_argument("--repo-url", required=True, help="Public GitHub repository URL (e.g. https://github.com/user/repo)")
+    receiver.add_argument("--branch", default="main", help="Branch to clone and build (default: main)")
+    receiver.add_argument("--docker-args", default="", help="Extra docker run arguments (e.g. '-e API_KEY=123 -p 8080:8080')")
+    receiver.add_argument("--output-dir", default="./outputs", help="Directory to write returned artifacts")
     receiver.set_defaults(handler=run_receiver)
+
+    request_access = subparsers.add_parser("request-access", parents=[common], help="Request access to a job")
+    request_access.set_defaults(handler=run_request_access)
+
+    accept_access = subparsers.add_parser("accept-access", parents=[common], help="Accept an access request for your job")
+    accept_access.set_defaults(handler=run_accept_access)
 
     return parser
 

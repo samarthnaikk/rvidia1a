@@ -25,6 +25,8 @@ def create_job(
         user_id=current_user.id,
         filename=payload.filename,
         command=payload.command,
+        repo_url=payload.repo_url if hasattr(payload, "repo_url") else None,
+        branch=getattr(payload, "branch", "main"),
         status="queued",
         receiver_node_id=f"receiver-user-{current_user.id}",
     )
@@ -54,6 +56,7 @@ def list_open_jobs(
 ):
     return (
         db.query(Job)
+        .filter(Job.user_id == current_user.id)
         .filter(Job.status.in_(["queued", "awaiting_receiver", "ready_for_transfer", "transferring"]))
         .order_by(Job.created_at.desc())
         .all()
