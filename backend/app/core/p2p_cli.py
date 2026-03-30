@@ -336,7 +336,7 @@ async def run_host(args):
 
     _api_patch(
         args.api_base,
-        f"/jobs/{args.job_id}/status",
+        f"/p2p/jobs/{args.job_id}/status",
         args.token,
         {"status": "running", "error_message": None},
     )
@@ -389,7 +389,7 @@ async def run_host(args):
 
     _api_post(
         args.api_base,
-        f"/jobs/{args.job_id}/complete",
+        f"/p2p/jobs/{args.job_id}/complete",
         args.token,
         {
             "success": success,

@@ -6,6 +6,8 @@ from app.models.job import Job
 from app.models.user import User
 from app.routes.auth import get_current_user
 from app.schemas.job import (
+    JobCompletionRequest,
+    JobUpdateStatusRequest,
     RegisterNodeRequest,
     SignalAnswerRequest,
     SignalCandidateRequest,
@@ -170,3 +172,47 @@ def pull_signals(
             remaining.append(item)
     _SIGNALS[job_id] = remaining
     return {"signals": deliver}
+
+
+@router.patch("/jobs/{job_id}/status")
+def p2p_update_job_status(
+    job_id: str,
+    payload: JobUpdateStatusRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ = current_user
+    job = _get_job(job_id, db)
+    job.status = payload.status
+    job.error_message = payload.error_message
+    db.commit()
+    db.refresh(job)
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "error_message": job.error_message,
+    }
+
+
+@router.post("/jobs/{job_id}/complete")
+def p2p_complete_job(
+    job_id: str,
+    payload: JobCompletionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ = current_user
+    job = _get_job(job_id, db)
+    job.status = "completed" if payload.success else "failed"
+    job.artifact_name = payload.artifact_name
+    job.artifact_path = payload.artifact_path
+    job.error_message = payload.error_message
+    db.commit()
+    db.refresh(job)
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "artifact_name": job.artifact_name,
+        "artifact_path": job.artifact_path,
+        "error_message": job.error_message,
+    }
