@@ -208,12 +208,24 @@ def _resolve_requested_job_id(api_base: str, token: str, requested_job_id: str) 
 
 
 def _job_not_found_hint(api_base: str, token: str, requested_job_id: str) -> str:
+    localhost_hint = ""
+    normalized_base = _normalize_api_base(api_base)
+    if normalized_base not in {"http://localhost:8000", "http://127.0.0.1:8000"}:
+        try:
+            _api_get("http://localhost:8000", f"/p2p/jobs/{requested_job_id}/access", token)
+            localhost_hint = (
+                " Detected this job on local Docker backend at http://localhost:8000; "
+                "retry with --api-base http://localhost:8000."
+            )
+        except Exception:
+            localhost_hint = ""
+
     try:
         jobs = _list_marketplace_jobs(api_base, token)
     except Exception as exc:
         return (
             f"Job '{requested_job_id}' was not found and marketplace lookup failed: {exc}. "
-            "Retry with --job-id latest."
+            f"Retry with --job-id latest.{localhost_hint}"
         )
 
     ids: list[str] = []
@@ -225,14 +237,14 @@ def _job_not_found_hint(api_base: str, token: str, requested_job_id: str) -> str
     if not ids:
         return (
             f"Job '{requested_job_id}' was not found and no marketplace jobs are visible for this token/backend. "
-            "Create/accept a job first, then retry."
+            f"Create/accept a job first, then retry.{localhost_hint}"
         )
 
     preview = ", ".join(ids[:5])
     return (
         f"Job '{requested_job_id}' was not found on {api_base}. "
         f"Visible job_id values (first {min(len(ids), 5)}): {preview}. "
-        "Use one of these IDs or pass --job-id latest."
+        f"Use one of these IDs or pass --job-id latest.{localhost_hint}"
     )
 
 
