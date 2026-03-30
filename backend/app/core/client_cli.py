@@ -105,6 +105,11 @@ def _print(data: Any) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+def _add_connection_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--api-base", default=None, help="Backend API base URL (defaults to saved session or env)")
+    parser.add_argument("--token", default=None, help="Override bearer token (defaults to saved session)")
+
+
 def cmd_signup(args: argparse.Namespace) -> None:
     api_base = _resolve_api_base(args.api_base)
     confirm_password = args.confirm_password if args.confirm_password is not None else args.password
@@ -254,12 +259,12 @@ def cmd_p2p_receiver(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RVIDIA CLI client")
-    parser.add_argument("--api-base", default=None, help="Backend API base URL (defaults to saved session or env)")
-    parser.add_argument("--token", default=None, help="Override bearer token (defaults to saved session)")
+    _add_connection_args(parser)
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     signup = sub.add_parser("signup", help="Create account")
+    _add_connection_args(signup)
     signup.add_argument("--username", required=True)
     signup.add_argument("--email", required=True)
     signup.add_argument("--password", required=True)
@@ -267,49 +272,61 @@ def build_parser() -> argparse.ArgumentParser:
     signup.set_defaults(handler=cmd_signup)
 
     login = sub.add_parser("login", help="Login and save local session")
+    _add_connection_args(login)
     login.add_argument("--username-or-email", required=True)
     login.add_argument("--password", required=True)
     login.set_defaults(handler=cmd_login)
 
     logout = sub.add_parser("logout", help="Clear local session")
+    _add_connection_args(logout)
     logout.set_defaults(handler=cmd_logout)
 
     whoami = sub.add_parser("whoami", help="Show current user")
+    _add_connection_args(whoami)
     whoami.set_defaults(handler=cmd_whoami)
 
     create_job = sub.add_parser("create-job", help="Create a new GitHub job")
+    _add_connection_args(create_job)
     create_job.add_argument("--repo-url", required=True)
     create_job.add_argument("--branch", default="main")
     create_job.add_argument("--command", default="")
     create_job.set_defaults(handler=cmd_create_job)
 
     list_jobs = sub.add_parser("list-jobs", help="List your jobs")
+    _add_connection_args(list_jobs)
     list_jobs.add_argument("--open", action="store_true", help="List only open/in-progress jobs")
     list_jobs.set_defaults(handler=cmd_list_jobs)
 
     get_job = sub.add_parser("get-job", help="Get one job by ID")
+    _add_connection_args(get_job)
     get_job.add_argument("--job-id", required=True)
     get_job.set_defaults(handler=cmd_get_job)
 
     marketplace = sub.add_parser("marketplace", help="List marketplace jobs")
+    _add_connection_args(marketplace)
     marketplace.set_defaults(handler=cmd_list_marketplace)
 
     hosts = sub.add_parser("hosts", help="List registered hosts and GPU metadata")
+    _add_connection_args(hosts)
     hosts.set_defaults(handler=cmd_list_hosts)
 
     request_access = sub.add_parser("request-access", help="Request access to a marketplace job")
+    _add_connection_args(request_access)
     request_access.add_argument("--job-id", required=True)
     request_access.set_defaults(handler=cmd_request_access)
 
     accept_access = sub.add_parser("accept-access", help="Accept access request for your job")
+    _add_connection_args(accept_access)
     accept_access.add_argument("--job-id", required=True)
     accept_access.set_defaults(handler=cmd_accept_access)
 
     access_state = sub.add_parser("access-state", help="Show access state for a job")
+    _add_connection_args(access_state)
     access_state.add_argument("--job-id", required=True)
     access_state.set_defaults(handler=cmd_access_state)
 
     p2p_host = sub.add_parser("p2p-host", help="Run host worker for a job")
+    _add_connection_args(p2p_host)
     p2p_host.add_argument("--job-id", required=True)
     p2p_host.add_argument("--workspace", default="./.p2p-workspaces")
     p2p_host.add_argument("--secret-key", default=None)
@@ -317,6 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     p2p_host.set_defaults(handler=cmd_p2p_host)
 
     p2p_receiver = sub.add_parser("p2p-receiver", help="Run receiver worker for a job")
+    _add_connection_args(p2p_receiver)
     p2p_receiver.add_argument("--job-id", required=True)
     p2p_receiver.add_argument("--repo-url", required=True)
     p2p_receiver.add_argument("--branch", default="main")
