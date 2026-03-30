@@ -1,25 +1,92 @@
-# Rvidia Hackathon
+# Rvidia MVP
 
-Project repository with separated services.
+This repository contains the MVP implementation for:
 
-## Structure
+1. User authentication (signup/login)
+2. Job creation and status tracking
+3. P2P file + log + artifact transfer using iroh
+4. Backend coordination only (no file/log relay through server)
 
-- `frontend/` - React + Vite + Tailwind web app
-- `backend/` - backend service
-- `nginx/` - reverse proxy config
-- `postgres/` - database setup
+## Project Structure
 
-## Frontend local run
+- `frontend/`: React + Vite UI
+- `backend/`: FastAPI API + iroh P2P CLI wrappers
+- `nginx/`: optional production reverse proxy
+- `postgres/`: PostgreSQL container setup
+
+## Docker Boot (Dev)
+
+Run the complete dev stack with:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+docker compose --profile dev up --build
 ```
 
-## Frontend build
+Services:
+
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+- Postgres: `localhost:5432`
+
+## MVP Web Flow
+
+1. Create account from the signup page.
+2. Log in from the login page.
+3. Open dashboard and submit a job from "Submit GPU Job".
+4. View status and results from "View Job Status / Results".
+
+## Backend API (MVP)
+
+Auth:
+
+- `POST /auth/signup`
+- `POST /auth/login`
+- `GET /auth/me`
+
+Jobs:
+
+- `POST /jobs`
+- `GET /jobs`
+- `GET /jobs/{job_id}`
+- `PATCH /jobs/{job_id}/status`
+- `POST /jobs/{job_id}/complete`
+
+P2P Coordination:
+
+- `POST /p2p/jobs/{job_id}/register-host`
+- `POST /p2p/jobs/{job_id}/register-receiver`
+- `GET /p2p/jobs/{job_id}/peers`
+
+## P2P Terminal Commands (Temporary MVP Support)
+
+Use these commands for host/receiver testing on same machine or LAN.
+
+### 1. Start Host
 
 ```bash
-cd frontend
-npm run build
+cd backend
+python -m app.core.p2p_cli host \
+	--api-base http://localhost:8000 \
+	--token <JWT_TOKEN> \
+	--job-id <JOB_ID>
 ```
+
+### 2. Start Receiver and Connect to Host
+
+```bash
+cd backend
+python -m app.core.p2p_cli receiver \
+	--api-base http://localhost:8000 \
+	--token <JWT_TOKEN> \
+	--job-id <JOB_ID> \
+	--host-node-id <HOST_NODE_ID> \
+	--file-path /absolute/path/to/input.file \
+	--command "python {input}"
+```
+
+Notes:
+
+- Logs are streamed P2P only (host -> receiver terminal).
+- Input file transfer is P2P only.
+- Output artifact return is P2P only.
+- Backend only stores coordination and final completion state.
