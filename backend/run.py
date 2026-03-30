@@ -32,9 +32,17 @@ def ensure_jobs_schema() -> None:
         "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS latest_receiver_node_id VARCHAR",
         "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS artifact_state VARCHAR NOT NULL DEFAULT 'PENDING'",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS host_heartbeat_at TIMESTAMP",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS receiver_heartbeat_at TIMESTAMP",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS failover_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS last_failover_reason TEXT",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS checkpoint_phase VARCHAR",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS checkpoint_data TEXT",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS checkpoint_updated_at TIMESTAMP",
         "UPDATE jobs SET branch = 'main' WHERE branch IS NULL",
         "UPDATE jobs SET access_status = 'open' WHERE access_status IS NULL",
         "UPDATE jobs SET session_version = 1 WHERE session_version IS NULL",
+        "UPDATE jobs SET failover_count = 0 WHERE failover_count IS NULL",
         "UPDATE jobs SET artifact_state = 'PENDING' WHERE artifact_state IS NULL",
     ]
     with engine.begin() as connection:

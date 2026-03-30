@@ -1,4 +1,5 @@
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,8 @@ from app.schemas.job import (
     AcceptAccessRequest,
     AccessRequestPayload,
     ArtifactStateUpdateRequest,
+    CheckpointUpdateRequest,
+    HeartbeatRequest,
     JobCompletionRequest,
     JobUpdateStatusRequest,
     RegisterHostRequest,
@@ -23,6 +26,7 @@ from app.schemas.job import (
 )
 
 router = APIRouter()
+_HEARTBEAT_TIMEOUT_SECONDS = 45
 
 
 def _as_int(value: object) -> int | None:
@@ -78,6 +82,53 @@ def _bump_session(job: Job) -> None:
     job.session_version = current + 1
 
 
+def _is_stale(heartbeat: datetime | None, now: datetime) -> bool:
+    if heartbeat is None:
+        return False
+    return (now - heartbeat) > timedelta(seconds=_HEARTBEAT_TIMEOUT_SECONDS)
+
+
+def _apply_stale_failover(job: Job, now: datetime) -> bool:
+    changed = False
+    host_stale = bool(job.host_node_id) and _is_stale(job.host_heartbeat_at, now)
+    receiver_stale = bool(job.receiver_node_id) and _is_stale(job.receiver_heartbeat_at, now)
+
+    if host_stale:
+        job.host_node_id = None
+        job.host_heartbeat_at = None
+        job.failover_count = int(job.failover_count or 0) + 1
+        job.last_failover_reason = "host_heartbeat_timeout"
+        job.checkpoint_phase = "system:failover_host_timeout"
+        job.checkpoint_data = json.dumps({
+            "reason": "host_heartbeat_timeout",
+            "recorded_at": now.isoformat(),
+        })
+        job.checkpoint_updated_at = now
+        job.status = "queued"
+        job.artifact_state = "PENDING"
+        job.error_message = "Host became unreachable; job was re-queued for failover"
+        _bump_session(job)
+        changed = True
+
+    if receiver_stale:
+        job.receiver_node_id = None
+        job.receiver_heartbeat_at = None
+        if job.status in {"ready_for_transfer", "transferring"}:
+            job.status = "awaiting_receiver"
+        job.failover_count = int(job.failover_count or 0) + 1
+        job.last_failover_reason = "receiver_heartbeat_timeout"
+        job.checkpoint_phase = "system:failover_receiver_timeout"
+        job.checkpoint_data = json.dumps({
+            "reason": "receiver_heartbeat_timeout",
+            "recorded_at": now.isoformat(),
+        })
+        job.checkpoint_updated_at = now
+        _bump_session(job)
+        changed = True
+
+    return changed
+
+
 def _marketplace_view(job: Job, current_user: User) -> dict:
     owner = _is_owner(job, current_user)
     requester = _is_requester(job, current_user)
@@ -105,6 +156,13 @@ def _marketplace_view(job: Job, current_user: User) -> dict:
         "ranking_version": job.ranking_version,
         "session_version": job.session_version,
         "artifact_state": job.artifact_state,
+        "host_heartbeat_at": job.host_heartbeat_at.isoformat() if job.host_heartbeat_at else None,
+        "receiver_heartbeat_at": job.receiver_heartbeat_at.isoformat() if job.receiver_heartbeat_at else None,
+        "failover_count": job.failover_count,
+        "last_failover_reason": job.last_failover_reason,
+        "checkpoint_phase": job.checkpoint_phase,
+        "checkpoint_data": job.checkpoint_data,
+        "checkpoint_updated_at": job.checkpoint_updated_at.isoformat() if job.checkpoint_updated_at else None,
         "latest_host_node_id": job.latest_host_node_id,
         "latest_receiver_node_id": job.latest_receiver_node_id,
         "can_request": (not owner) and job.access_status == "open",
@@ -128,6 +186,18 @@ def list_hosts(
         .order_by(Job.created_at.desc())
         .all()
     )
+    now = datetime.utcnow()
+    changed = False
+    for job in jobs:
+        changed = _apply_stale_failover(job, now) or changed
+    if changed:
+        db.commit()
+        jobs = (
+            db.query(Job)
+            .filter(Job.host_node_id.isnot(None))
+            .order_by(Job.created_at.desc())
+            .all()
+        )
     return [
         {
             "job_id": j.id,
@@ -160,6 +230,13 @@ def list_marketplace_jobs(
 ):
     """Return pending jobs with repo metadata for host browsing."""
     jobs = db.query(Job).order_by(Job.created_at.desc()).all()
+    now = datetime.utcnow()
+    changed = False
+    for job in jobs:
+        changed = _apply_stale_failover(job, now) or changed
+    if changed:
+        db.commit()
+        jobs = db.query(Job).order_by(Job.created_at.desc()).all()
     visible: list[dict] = []
     for job in jobs:
         owner = _is_owner(job, current_user)
@@ -179,6 +256,9 @@ def get_access_state(
     current_user: User = Depends(get_current_user),
 ):
     job = _get_job(job_id, db)
+    if _apply_stale_failover(job, datetime.utcnow()):
+        db.commit()
+        db.refresh(job)
     owner = _is_owner(job, current_user)
     requester = _is_requester(job, current_user)
     if not owner and not requester and job.access_status != "open":
@@ -352,6 +432,7 @@ def register_host(
         raise HTTPException(status_code=403, detail="Only job participants can register as host")
     job.host_node_id = payload.node_id
     job.latest_host_node_id = payload.node_id
+    job.host_heartbeat_at = datetime.utcnow()
     _bump_session(job)
     if payload.gpu_model is not None:
         job.gpu_model = payload.gpu_model
@@ -407,6 +488,7 @@ def register_receiver(
         raise HTTPException(status_code=409, detail="Access must be accepted before receiver can register")
     job.receiver_node_id = payload.node_id
     job.latest_receiver_node_id = payload.node_id
+    job.receiver_heartbeat_at = datetime.utcnow()
     _bump_session(job)
     if job.host_node_id:
         job.status = "ready_for_transfer"
@@ -424,6 +506,111 @@ def register_receiver(
     }
 
 
+@router.post("/jobs/{job_id}/heartbeat")
+def heartbeat(
+    job_id: str,
+    payload: HeartbeatRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
+    now = datetime.utcnow()
+    changed = _apply_stale_failover(job, now)
+
+    role = (payload.role or "").strip().lower()
+    node_id = (payload.node_id or "").strip()
+    if not node_id:
+        raise HTTPException(status_code=400, detail="node_id is required")
+    if role not in {"host", "receiver"}:
+        raise HTTPException(status_code=400, detail="role must be 'host' or 'receiver'")
+
+    if role == "host":
+        if not job.host_node_id:
+            job.host_node_id = node_id
+            _bump_session(job)
+            changed = True
+        job.latest_host_node_id = node_id
+        job.host_heartbeat_at = now
+        if job.access_status == "accepted" and job.status == "queued":
+            job.status = "awaiting_receiver"
+            changed = True
+        if job.last_failover_reason == "host_heartbeat_timeout":
+            job.last_failover_reason = None
+            changed = True
+    else:
+        if not job.receiver_node_id:
+            job.receiver_node_id = node_id
+            _bump_session(job)
+            changed = True
+        job.latest_receiver_node_id = node_id
+        job.receiver_heartbeat_at = now
+        if job.host_node_id and job.status in {"awaiting_receiver", "queued", "ready_for_transfer"}:
+            job.status = "ready_for_transfer"
+            changed = True
+        if job.last_failover_reason == "receiver_heartbeat_timeout":
+            job.last_failover_reason = None
+            changed = True
+
+    if changed:
+        db.commit()
+        db.refresh(job)
+
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "artifact_state": job.artifact_state,
+        "session_version": job.session_version,
+        "host_node_id": job.host_node_id,
+        "receiver_node_id": job.receiver_node_id,
+        "host_heartbeat_at": job.host_heartbeat_at.isoformat() if job.host_heartbeat_at else None,
+        "receiver_heartbeat_at": job.receiver_heartbeat_at.isoformat() if job.receiver_heartbeat_at else None,
+        "failover_count": job.failover_count,
+        "last_failover_reason": job.last_failover_reason,
+        "checkpoint_phase": job.checkpoint_phase,
+        "checkpoint_data": job.checkpoint_data,
+        "checkpoint_updated_at": job.checkpoint_updated_at.isoformat() if job.checkpoint_updated_at else None,
+    }
+
+
+@router.post("/jobs/{job_id}/checkpoint")
+def update_checkpoint(
+    job_id: str,
+    payload: CheckpointUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
+
+    role = (payload.role or "").strip().lower()
+    phase = (payload.phase or "").strip()
+    if role not in {"host", "receiver"}:
+        raise HTTPException(status_code=400, detail="role must be 'host' or 'receiver'")
+    if not phase:
+        raise HTTPException(status_code=400, detail="phase is required")
+
+    checkpoint_payload = {
+        "role": role,
+        "phase": phase,
+        "data": payload.data or {},
+        "recorded_at": datetime.utcnow().isoformat(),
+    }
+    job.checkpoint_phase = f"{role}:{phase}"
+    job.checkpoint_data = json.dumps(checkpoint_payload)
+    job.checkpoint_updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(job)
+    checkpoint_updated_at = job.checkpoint_updated_at
+
+    return {
+        "job_id": job.id,
+        "checkpoint_phase": job.checkpoint_phase,
+        "checkpoint_data": job.checkpoint_data,
+        "checkpoint_updated_at": checkpoint_updated_at.isoformat() if checkpoint_updated_at is not None else None,
+    }
+
+
 @router.get("/jobs/{job_id}/peers")
 def get_job_peers(
     job_id: str,
@@ -432,6 +619,9 @@ def get_job_peers(
 ):
     job = _get_job(job_id, db)
     _ensure_participant_access(job, current_user)
+    if _apply_stale_failover(job, datetime.utcnow()):
+        db.commit()
+        db.refresh(job)
     return {
         "job_id": job.id,
         "host_node_id": job.host_node_id,
@@ -440,6 +630,13 @@ def get_job_peers(
         "latest_receiver_node_id": job.latest_receiver_node_id or job.receiver_node_id,
         "session_version": job.session_version,
         "artifact_state": job.artifact_state,
+        "host_heartbeat_at": job.host_heartbeat_at.isoformat() if job.host_heartbeat_at else None,
+        "receiver_heartbeat_at": job.receiver_heartbeat_at.isoformat() if job.receiver_heartbeat_at else None,
+        "failover_count": job.failover_count,
+        "last_failover_reason": job.last_failover_reason,
+        "checkpoint_phase": job.checkpoint_phase,
+        "checkpoint_data": job.checkpoint_data,
+        "checkpoint_updated_at": job.checkpoint_updated_at.isoformat() if job.checkpoint_updated_at else None,
         "ready": bool(job.host_node_id and job.receiver_node_id),
         "status": job.status,
     }

@@ -27,6 +27,13 @@ class Job(Base):
     latest_receiver_node_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     artifact_state: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    host_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receiver_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    failover_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_failover_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    checkpoint_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # GPU metadata reported by host on registration
     gpu_model: Mapped[str | None] = mapped_column(String, nullable=True)

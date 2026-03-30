@@ -38,6 +38,13 @@ class JobResponse(BaseModel):
     latest_receiver_node_id: str | None
     session_version: int
     artifact_state: str
+    host_heartbeat_at: datetime | None
+    receiver_heartbeat_at: datetime | None
+    failover_count: int
+    last_failover_reason: str | None
+    checkpoint_phase: str | None
+    checkpoint_data: str | None
+    checkpoint_updated_at: datetime | None
     gpu_model: str | None
     gpu_vram: str | None
     gpu_driver: str | None
@@ -84,6 +91,17 @@ class RegisterHostRequest(BaseModel):
     memory_score: float | None = None
     machine_score: float | None = None
     ranking_version: str | None = None
+
+
+class HeartbeatRequest(BaseModel):
+    node_id: str
+    role: str
+
+
+class CheckpointUpdateRequest(BaseModel):
+    role: str
+    phase: str
+    data: dict[str, Any] | None = None
 
 
 class AccessRequestPayload(BaseModel):

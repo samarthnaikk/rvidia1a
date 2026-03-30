@@ -1,5 +1,6 @@
 ﻿import argparse
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import json
@@ -28,6 +29,7 @@ _RECONNECT_INTERVAL = 5  # seconds between reconnect attempts
 _ACK_POLL_INTERVAL = 2
 _RESULT_RETRY_INTERVAL = 5
 _DELIVERY_TIMEOUT_SECONDS = 20 * 60
+_HEARTBEAT_INTERVAL_SECONDS = 10
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -151,6 +153,31 @@ def _api_set_artifact_state(api_base: str, token: str, job_id: str, artifact_sta
     return payload if isinstance(payload, dict) else {}
 
 
+def _api_set_checkpoint(
+    api_base: str,
+    token: str,
+    job_id: str,
+    role: str,
+    phase: str,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        payload = _api_post(
+            api_base,
+            f"/p2p/jobs/{job_id}/checkpoint",
+            token,
+            {
+                "role": role,
+                "phase": phase,
+                "data": data or {},
+            },
+        )
+        return payload if isinstance(payload, dict) else {}
+    except Exception as exc:
+        print(f"[RVIDIA] checkpoint warning ({role}:{phase}): {exc}", file=sys.stderr)
+        return {}
+
+
 def _list_marketplace_jobs(api_base: str, token: str) -> list[dict[str, Any]]:
     payload = _api_get(api_base, "/p2p/jobs", token)
     return payload if isinstance(payload, list) else []
@@ -190,6 +217,20 @@ async def _wait_for_access_accepted(api_base: str, token: str, job_id: str) -> N
             raise RuntimeError("Access request is still open; requester must call request-access first")
         print(f"[RVIDIA] Waiting for access acceptance (current: {status or 'unknown'})...")
         await asyncio.sleep(2)
+
+
+async def _heartbeat_loop(args, role: str, node_id: str) -> None:
+    while True:
+        try:
+            _api_post(
+                args.api_base,
+                f"/p2p/jobs/{args.job_id}/heartbeat",
+                args.token,
+                {"node_id": node_id, "role": role},
+            )
+        except Exception as exc:
+            print(f"[RVIDIA] heartbeat warning ({role}): {exc}", file=sys.stderr)
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
 
 
 # â”€â”€ GPU Detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -772,6 +813,14 @@ async def _host_execute_docker(
     )
 
     # 1. Clone the repository.
+    _api_set_checkpoint(
+        args.api_base,
+        args.token,
+        args.job_id,
+        "host",
+        "cloning_repo",
+        {"repo_url": repo_url, "branch": branch},
+    )
     repo_dir = workspace_dir / "repo"
     if repo_dir.exists():
         shutil.rmtree(repo_dir)
@@ -788,6 +837,14 @@ async def _host_execute_docker(
     image_tag = f"task_{args.job_id[:12]}"
 
     # 2. Docker build.
+    _api_set_checkpoint(
+        args.api_base,
+        args.token,
+        args.job_id,
+        "host",
+        "building_image",
+        {"image_tag": image_tag},
+    )
     print(f"[RVIDIA] Building Docker image '{image_tag}'...")
     build_cmd = f"docker build -t {image_tag} ."
     build_proc, build_logs, build_captured = await _run_command_with_logs(build_cmd, repo_dir)
@@ -858,6 +915,14 @@ async def _host_execute_docker(
 
     print(f"[RVIDIA] Running container '{image_tag}'...")
     print(f"[RVIDIA] GPU requested: {prefer_gpu}")
+    _api_set_checkpoint(
+        args.api_base,
+        args.token,
+        args.job_id,
+        "host",
+        "running_container",
+        {"image_tag": image_tag, "prefer_gpu": prefer_gpu},
+    )
     run_rc = 1
     run_captured: list[str] = []
     execution_mode = "GPU"
@@ -924,6 +989,14 @@ async def _host_execute_docker(
         print(f"[RVIDIA]   {out_file.name} ({size} bytes)")
 
     success = run_rc == 0
+    _api_set_checkpoint(
+        args.api_base,
+        args.token,
+        args.job_id,
+        "host",
+        "artifact_ready",
+        {"artifact_count": len(output_files), "success": success},
+    )
     return {
         "success": success,
         "error_message": None if success else f"Container exited with code {run_rc}",
@@ -1025,99 +1098,120 @@ async def run_host(args):
         raise
 
     print(f"HOST_NODE_ID={node_id}")
+    _api_set_checkpoint(args.api_base, args.token, args.job_id, "host", "registered", {"node_id": node_id})
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(args, "host", node_id))
 
-    persisted_state = _load_job_state(args.workspace, args.job_id)
-    if not isinstance(persisted_state, dict):
-        persisted_state = {}
+    try:
+        persisted_state = _load_job_state(args.workspace, args.job_id)
+        if not isinstance(persisted_state, dict):
+            persisted_state = {}
 
-    if persisted_state.get("phase") == "artifact_ready":
-        print("[RVIDIA] Resuming host delivery from persisted state (artifact already computed).")
-        _api_set_artifact_state(args.api_base, args.token, args.job_id, "READY_FOR_TRANSFER")
-    else:
-        print("[RVIDIA] Host waiting for renter repo signal...")
-        incoming: dict[str, Any] | None = None
-        waited = 0
-        while incoming is None:
-            for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
-                if signal.get("type") == "input_ticket":
-                    incoming = signal
-                    break
-            if incoming is None:
-                await asyncio.sleep(2)
-                waited += 2
-                if waited % 20 == 0:
-                    print(
-                        f"[RVIDIA] Still waiting for renter input_ticket on job {args.job_id} "
-                        f"({waited}s elapsed).",
+        if persisted_state.get("phase") == "artifact_ready":
+            print("[RVIDIA] Resuming host delivery from persisted state (artifact already computed).")
+            _api_set_artifact_state(args.api_base, args.token, args.job_id, "READY_FOR_TRANSFER")
+            _api_set_checkpoint(args.api_base, args.token, args.job_id, "host", "resume_artifact_ready")
+        else:
+            print("[RVIDIA] Host waiting for renter repo signal...")
+            _api_set_checkpoint(args.api_base, args.token, args.job_id, "host", "waiting_input_ticket")
+            incoming: dict[str, Any] | None = None
+            waited = 0
+            while incoming is None:
+                for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
+                    if signal.get("type") == "input_ticket":
+                        incoming = signal
+                        break
+                if incoming is None:
+                    await asyncio.sleep(2)
+                    waited += 2
+                    if waited % 20 == 0:
+                        print(
+                            f"[RVIDIA] Still waiting for renter input_ticket on job {args.job_id} "
+                            f"({waited}s elapsed).",
+                        )
+
+            receiver_node_id = str(incoming.get("from_node_id") or "")
+            repo_url = str(incoming.get("repo_url") or "")
+            branch = str(incoming.get("branch") or "main")
+            docker_args = str(incoming.get("docker_args") or "")
+
+            if not receiver_node_id or not repo_url:
+                raise RuntimeError("Invalid input_ticket signal: missing receiver_node_id or repo_url")
+
+            _api_set_checkpoint(
+                args.api_base,
+                args.token,
+                args.job_id,
+                "host",
+                "input_ticket_received",
+                {"receiver_node_id": receiver_node_id, "repo_url": repo_url, "branch": branch},
+            )
+
+            computed = await _host_execute_docker(
+                args=args,
+                node=node,
+                node_id=node_id,
+                receiver_node_id=receiver_node_id,
+                repo_url=repo_url,
+                branch=branch,
+                docker_args=docker_args,
+                prefer_gpu=bool(gpu_info.get("gpu_model")),
+            )
+
+            artifacts = []
+            for output_path in computed["output_files"]:
+                artifact_path = Path(str(output_path)).resolve()
+                if artifact_path.exists() and artifact_path.is_file():
+                    artifacts.append(
+                        {
+                            "name": artifact_path.name,
+                            "path": str(artifact_path),
+                            "size": artifact_path.stat().st_size,
+                            "sha256": _sha256_file(artifact_path),
+                        }
                     )
 
-        receiver_node_id = str(incoming.get("from_node_id") or "")
-        repo_url = str(incoming.get("repo_url") or "")
-        branch = str(incoming.get("branch") or "main")
-        docker_args = str(incoming.get("docker_args") or "")
+            persisted_state = {
+                "phase": "artifact_ready",
+                "receiver_node_id": computed.get("receiver_node_id"),
+                "repo_url": repo_url,
+                "branch": branch,
+                "docker_args": docker_args,
+                "success": bool(computed.get("success")),
+                "error_message": computed.get("error_message"),
+                "logs_file": computed.get("logs_file"),
+                "artifacts": artifacts,
+            }
+            _save_job_state(args.workspace, args.job_id, persisted_state)
+            _api_set_artifact_state(args.api_base, args.token, args.job_id, "READY_FOR_TRANSFER")
 
-        if not receiver_node_id or not repo_url:
-            raise RuntimeError("Invalid input_ticket signal: missing receiver_node_id or repo_url")
+        _api_set_checkpoint(args.api_base, args.token, args.job_id, "host", "delivering")
+        delivered = await _host_delivery_from_state(args, node, node_id, persisted_state)
+        if not delivered:
+            raise RuntimeError("Artifact delivery timed out without receiver ACK")
+        _api_set_checkpoint(args.api_base, args.token, args.job_id, "host", "artifact_delivered")
 
-        computed = await _host_execute_docker(
-            args=args,
-            node=node,
-            node_id=node_id,
-            receiver_node_id=receiver_node_id,
-            repo_url=repo_url,
-            branch=branch,
-            docker_args=docker_args,
-            prefer_gpu=bool(gpu_info.get("gpu_model")),
-        )
-
-        artifacts = []
-        for output_path in computed["output_files"]:
-            artifact_path = Path(str(output_path)).resolve()
-            if artifact_path.exists() and artifact_path.is_file():
-                artifacts.append(
-                    {
-                        "name": artifact_path.name,
-                        "path": str(artifact_path),
-                        "size": artifact_path.stat().st_size,
-                        "sha256": _sha256_file(artifact_path),
-                    }
-                )
-
-        persisted_state = {
-            "phase": "artifact_ready",
-            "receiver_node_id": computed.get("receiver_node_id"),
-            "repo_url": repo_url,
-            "branch": branch,
-            "docker_args": docker_args,
-            "success": bool(computed.get("success")),
-            "error_message": computed.get("error_message"),
-            "logs_file": computed.get("logs_file"),
-            "artifacts": artifacts,
-        }
+        persisted_state["phase"] = "delivered"
         _save_job_state(args.workspace, args.job_id, persisted_state)
-        _api_set_artifact_state(args.api_base, args.token, args.job_id, "READY_FOR_TRANSFER")
+        _api_set_artifact_state(args.api_base, args.token, args.job_id, "DELIVERED")
 
-    delivered = await _host_delivery_from_state(args, node, node_id, persisted_state)
-    if not delivered:
-        raise RuntimeError("Artifact delivery timed out without receiver ACK")
-
-    persisted_state["phase"] = "delivered"
-    _save_job_state(args.workspace, args.job_id, persisted_state)
-    _api_set_artifact_state(args.api_base, args.token, args.job_id, "DELIVERED")
-
-    output_files = _collect_host_artifacts_from_state(persisted_state)
-    _api_post(
-        args.api_base,
-        f"/p2p/jobs/{args.job_id}/complete",
-        args.token,
-        {
-            "success": bool(persisted_state.get("success")),
-            "artifact_name": output_files[0].name if output_files else None,
-            "artifact_path": str(output_files[0]) if output_files else None,
-            "error_message": persisted_state.get("error_message"),
-        },
-    )
-    print(f"[RVIDIA] Host completed task {args.job_id}.")
+        output_files = _collect_host_artifacts_from_state(persisted_state)
+        _api_post(
+            args.api_base,
+            f"/p2p/jobs/{args.job_id}/complete",
+            args.token,
+            {
+                "success": bool(persisted_state.get("success")),
+                "artifact_name": output_files[0].name if output_files else None,
+                "artifact_path": str(output_files[0]) if output_files else None,
+                "error_message": persisted_state.get("error_message"),
+            },
+        )
+        _api_set_checkpoint(args.api_base, args.token, args.job_id, "host", "completed")
+        print(f"[RVIDIA] Host completed task {args.job_id}.")
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
 
 
 async def _resolve_host_node_id(api_base: str, token: str, job_id: str, preferred: str = "") -> str:
@@ -1133,6 +1227,8 @@ async def _resolve_host_node_id(api_base: str, token: str, job_id: str, preferre
 
 async def _receive_and_ack_result(args, node: RvidiaNode, node_id: str) -> tuple[list[Path], bool, str | None]:
     result: dict[str, Any] | None = None
+    stalled_polls = 0
+    _api_set_checkpoint(args.api_base, args.token, args.job_id, "receiver", "waiting_result_ticket")
     while result is None:
         for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
             if signal.get("type") == "result_ticket":
@@ -1140,6 +1236,24 @@ async def _receive_and_ack_result(args, node: RvidiaNode, node_id: str) -> tuple
                 break
         if result is None:
             await asyncio.sleep(2)
+            stalled_polls += 1
+            if stalled_polls % 5 == 0:
+                peers = _api_get(args.api_base, f"/p2p/jobs/{args.job_id}/peers", args.token)
+                status = str(peers.get("status") or "")
+                if status in {"queued", "failed"} and not peers.get("host_node_id"):
+                    raise RuntimeError(
+                        "Host session appears stale and job has been re-queued. "
+                        "Start receiver again after a host re-registers."
+                    )
+
+    _api_set_checkpoint(
+        args.api_base,
+        args.token,
+        args.job_id,
+        "receiver",
+        "result_ticket_received",
+        {"from_node_id": str(result.get("from_node_id") or "")},
+    )
 
     transfer_id = str(result.get("transfer_id") or "")
     logs_ticket = str(result.get("logs_ticket") or "")
@@ -1177,6 +1291,15 @@ async def _receive_and_ack_result(args, node: RvidiaNode, node_id: str) -> tuple
                 f"Checksum mismatch for '{name}': expected {expected_sha}, got {actual_sha}"
             )
         saved_paths.append(target_path)
+
+    _api_set_checkpoint(
+        args.api_base,
+        args.token,
+        args.job_id,
+        "receiver",
+        "artifact_downloaded",
+        {"artifact_count": len(saved_paths)},
+    )
 
     if logs_ticket:
         try:
@@ -1252,45 +1375,61 @@ async def _run_receiver_common(args, send_input_ticket: bool) -> None:
             raise
 
     print(f"RECEIVER_NODE_ID={node_id}")
+    _api_set_checkpoint(args.api_base, args.token, args.job_id, "receiver", "registered", {"node_id": node_id})
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(args, "receiver", node_id))
     host_node_id = await _resolve_host_node_id(args.api_base, args.token, args.job_id, args.host_node_id)
 
-    if send_input_ticket:
-        _api_patch(
+    try:
+        if send_input_ticket:
+            _api_patch(
+                args.api_base,
+                f"/p2p/jobs/{args.job_id}/status",
+                args.token,
+                {"status": "transferring", "error_message": None},
+            )
+            _push_signal(
+                api_base=args.api_base,
+                token=args.token,
+                job_id=args.job_id,
+                from_node_id=node_id,
+                to_node_id=host_node_id,
+                message={
+                    "type": "input_ticket",
+                    "repo_url": args.repo_url,
+                    "branch": args.branch,
+                    "docker_args": getattr(args, "docker_args", "") or "",
+                },
+            )
+            print(f"[RVIDIA] Sent repo signal to host: {args.repo_url} (branch: {args.branch})")
+            _api_set_checkpoint(
+                args.api_base,
+                args.token,
+                args.job_id,
+                "receiver",
+                "input_ticket_sent",
+                {"host_node_id": host_node_id, "repo_url": args.repo_url, "branch": args.branch},
+            )
+
+        saved_paths, success, error_message = await _receive_and_ack_result(args, node, node_id)
+        if register_receiver_supported:
+            _api_set_artifact_state(args.api_base, args.token, args.job_id, "DELIVERED")
+        _api_post(
             args.api_base,
-            f"/p2p/jobs/{args.job_id}/status",
+            f"/p2p/jobs/{args.job_id}/complete",
             args.token,
-            {"status": "transferring", "error_message": None},
-        )
-        _push_signal(
-            api_base=args.api_base,
-            token=args.token,
-            job_id=args.job_id,
-            from_node_id=node_id,
-            to_node_id=host_node_id,
-            message={
-                "type": "input_ticket",
-                "repo_url": args.repo_url,
-                "branch": args.branch,
-                "docker_args": getattr(args, "docker_args", "") or "",
+            {
+                "success": success,
+                "artifact_name": saved_paths[0].name if saved_paths else None,
+                "artifact_path": str(saved_paths[0]) if saved_paths else None,
+                "error_message": None if success else error_message or "Remote execution failed",
             },
         )
-        print(f"[RVIDIA] Sent repo signal to host: {args.repo_url} (branch: {args.branch})")
-
-    saved_paths, success, error_message = await _receive_and_ack_result(args, node, node_id)
-    if register_receiver_supported:
-        _api_set_artifact_state(args.api_base, args.token, args.job_id, "DELIVERED")
-    _api_post(
-        args.api_base,
-        f"/p2p/jobs/{args.job_id}/complete",
-        args.token,
-        {
-            "success": success,
-            "artifact_name": saved_paths[0].name if saved_paths else None,
-            "artifact_path": str(saved_paths[0]) if saved_paths else None,
-            "error_message": None if success else error_message or "Remote execution failed",
-        },
-    )
-    print(f"[RVIDIA] Receiver completed task {args.job_id}.")
+        _api_set_checkpoint(args.api_base, args.token, args.job_id, "receiver", "completed")
+        print(f"[RVIDIA] Receiver completed task {args.job_id}.")
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
 
 
 async def run_receiver(args):
