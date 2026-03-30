@@ -213,13 +213,21 @@ def _is_wsl() -> bool:
 
 # ── Docker helpers ────────────────────────────────────────────────────────────
 
-async def _run_command_with_logs(command: str, cwd: Path):
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        cwd=str(cwd),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+async def _run_command_with_logs(command: str | list[str], cwd: Path):
+    if isinstance(command, str):
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
 
     captured: list[str] = []
 
@@ -454,7 +462,7 @@ async def _host_execute_docker(
         return cmd
 
     print(f"[RVIDIA] Running container '{image_tag}'...")
-    print(f"[RVIDIA] GPU requested: True")
+    print(f"[RVIDIA] GPU requested: {prefer_gpu}")
     run_rc = 1
     run_captured: list[str] = []
     execution_mode = "GPU"
