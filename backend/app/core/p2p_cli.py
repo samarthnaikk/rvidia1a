@@ -350,11 +350,18 @@ async def run_host(args):
     proc, _log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
     return_code = await proc.wait()
 
+    output_lines = list(captured_lines)
+    if not output_lines:
+        output_lines = [
+            f"Command produced no stdout/stderr: {command}",
+            f"Exit code: {return_code}",
+        ]
+
     artifact = workspace_dir / "artifact.txt"
-    artifact.write_text("\n".join(captured_lines), encoding="utf-8")
+    artifact.write_text("\n".join(output_lines), encoding="utf-8")
 
     logs_file = workspace_dir / "execution.log"
-    logs_file.write_text("\n".join(captured_lines), encoding="utf-8")
+    logs_file.write_text("\n".join(output_lines), encoding="utf-8")
 
     artifact_ticket = await _share_file_ticket(node, artifact)
     logs_ticket = await _share_file_ticket(node, logs_file)
