@@ -342,6 +342,7 @@ async def _host_execute_docker(
     repo_url: str,
     branch: str,
     docker_args: str,
+    prefer_gpu: bool,
 ) -> None:
     """Clone repo, docker build+run inside /outputs volume, ship artifacts back."""
     workspace_dir = Path(args.workspace) / args.job_id
@@ -400,12 +401,20 @@ async def _host_execute_docker(
     run_rc = 1
     run_captured: list[str] = []
 
-    # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
-    gpu_first = _build_run_cmd(use_gpu=True)
-    run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
-    async for line in run_logs:
-        print(f"[docker run] {line}")
-    run_rc = await run_proc.wait()
+    if prefer_gpu:
+        # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
+        gpu_first = _build_run_cmd(use_gpu=True)
+        run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
+        async for line in run_logs:
+            print(f"[docker run] {line}")
+        run_rc = await run_proc.wait()
+    else:
+        print("[RVIDIA] No GPU detected; running container in CPU mode.")
+        cpu_cmd = _build_run_cmd(use_gpu=False)
+        run_proc, run_logs, run_captured = await _run_command_with_logs(cpu_cmd, workspace_dir)
+        async for line in run_logs:
+            print(f"[docker run] {line}")
+        run_rc = await run_proc.wait()
 
     if run_rc != 0:
         combined = "\n".join(run_captured).lower()
@@ -582,6 +591,7 @@ async def run_host(args):
                 repo_url=repo_url,
                 branch=branch,
                 docker_args=docker_args,
+                prefer_gpu=bool(gpu_info.get("gpu_model")),
             )
             running_container = None
             break  # Job done — exit loop.
