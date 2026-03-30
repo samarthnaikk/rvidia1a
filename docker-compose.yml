@@ -1,10 +1,13 @@
+version: "3.9"
+
 services:
   backend:
     build: ./backend
     restart: always
     depends_on:
-      - postgres
-    profiles: ["dev","prod"]
+      postgres:
+        condition: service_healthy
+    profiles: ["dev", "prod"]
     ports:
       - "8000:8000"
     environment:
@@ -15,22 +18,22 @@ services:
 
   frontend:
     build: ./frontend
-    profiles: ["dev","prod"]
+    profiles: ["dev", "prod"]
     ports:
       - "3000:3000"
 
   nginx:
     build: ./nginx
+    profiles: ["prod"]
     ports:
       - "80:80"
     depends_on:
       - frontend
       - backend
-    profiles: ["prod"]
 
   postgres:
-    build: ./postgres
-    profiles: ["dev","prod"]
+    image: postgres:15
+    profiles: ["dev", "prod"]
     ports:
       - "5432:5432"
     environment:
@@ -39,6 +42,11 @@ services:
       POSTGRES_DB: appdb
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pgdata:
