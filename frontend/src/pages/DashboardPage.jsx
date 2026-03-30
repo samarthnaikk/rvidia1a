@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react'
-import { acceptJobAccess, listJobs, listMarketplaceJobs, requestJobAccess } from '../lib/api'
+import {
+  acceptJobAccess,
+  getContributorSummaries,
+  getDailyAnalytics,
+  getP2PTelemetry,
+  listJobs,
+  listMarketplaceJobs,
+  requestJobAccess,
+} from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const defaultApiBase = (() => {
@@ -15,6 +23,10 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
   })()
   const [marketplaceJobs, setMarketplaceJobs] = useState([])
   const [myJobs, setMyJobs] = useState([])
+  const [telemetry, setTelemetry] = useState(null)
+  const [contributors, setContributors] = useState([])
+  const [analyticsSeries, setAnalyticsSeries] = useState([])
+  const [insightsError, setInsightsError] = useState('')
   const [hostError, setHostError] = useState('')
   const [rentError, setRentError] = useState('')
   const tokenForCmd = authToken || 'MISSING_TOKEN'
@@ -32,6 +44,13 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
       return 'Unknown'
     }
     return `${Math.max(1, Math.round(Number(mb) / 1024))} GB`
+  }
+
+  const formatUtc = (value) => {
+    if (!value) return 'Unknown'
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return 'Unknown'
+    return parsed.toLocaleString()
   }
 
   const refreshMarketplace = async (active) => {
@@ -53,6 +72,37 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
 
     refreshMarketplace(active)
     const intervalId = setInterval(() => refreshMarketplace(active), 5000)
+
+    return () => {
+      active = false
+      clearInterval(intervalId)
+    }
+  }, [authToken])
+
+  useEffect(() => {
+    let active = true
+
+    const loadInsights = async () => {
+      try {
+        const [telemetryData, contributorData, analyticsData] = await Promise.all([
+          getP2PTelemetry(authToken),
+          getContributorSummaries(authToken),
+          getDailyAnalytics(authToken, 14),
+        ])
+        if (!active) return
+        setTelemetry(telemetryData)
+        setContributors(Array.isArray(contributorData?.contributors) ? contributorData.contributors : [])
+        setAnalyticsSeries(Array.isArray(analyticsData?.series) ? analyticsData.series : [])
+        setInsightsError('')
+      } catch (error) {
+        if (active) {
+          setInsightsError(error.message)
+        }
+      }
+    }
+
+    loadInsights()
+    const intervalId = setInterval(loadInsights, 10000)
 
     return () => {
       active = false
@@ -259,6 +309,102 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
               {marketplaceJobs.length === 0 && (
                 <p className="text-[13px] text-slate-400">No open jobs currently available for hosting.</p>
               )}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-8 rounded-[12px] border border-white/15 bg-[#0b1322c9] p-6">
+          <p className="text-[10px] uppercase tracking-[3px] text-emerald-300/75">Operations Insights</p>
+          <h2 className="mt-3 text-[30px] font-bold uppercase tracking-[1px] text-slate-100">Real-Time Usage Dashboard</h2>
+          <p className="mt-2 text-[14px] text-slate-400">
+            Live system telemetry, contributor history, and 14-day usage analytics.
+          </p>
+
+          {insightsError && <p className="mt-4 text-[12px] text-red-300">{insightsError}</p>}
+
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <div className="rounded border border-white/10 bg-[#060b14] p-4">
+              <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Active Hosts</p>
+              <p className="mt-2 text-[24px] font-bold text-emerald-200">{telemetry?.active_hosts ?? '-'}</p>
+              <p className="mt-1 text-[11px] text-slate-400">Live heartbeat contributors</p>
+            </div>
+            <div className="rounded border border-white/10 bg-[#060b14] p-4">
+              <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Active Receivers</p>
+              <p className="mt-2 text-[24px] font-bold text-emerald-200">{telemetry?.active_receivers ?? '-'}</p>
+              <p className="mt-1 text-[11px] text-slate-400">In-session requesters</p>
+            </div>
+            <div className="rounded border border-white/10 bg-[#060b14] p-4">
+              <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Pending Failovers</p>
+              <p className="mt-2 text-[24px] font-bold text-emerald-200">{telemetry?.pending_failovers ?? '-'}</p>
+              <p className="mt-1 text-[11px] text-slate-400">Jobs awaiting recovery</p>
+            </div>
+          </div>
+
+          <div className="mt-5 rounded border border-white/10 bg-[#060b14] p-4">
+            <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Task Status Distribution</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {Object.entries(telemetry?.status_counts || {}).map(([status, count]) => (
+                <span
+                  key={status}
+                  className="rounded border border-white/10 bg-[#0d1424] px-3 py-1 text-[11px] uppercase tracking-[1px] text-slate-300"
+                >
+                  {status}: {count}
+                </span>
+              ))}
+              {Object.keys(telemetry?.status_counts || {}).length === 0 && (
+                <p className="text-[12px] text-slate-400">No status data yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-6 lg:grid-cols-2">
+            <div className="rounded border border-white/10 bg-[#060b14] p-4">
+              <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Contributor History</p>
+              <div className="mt-3 max-h-[320px] space-y-3 overflow-y-auto pr-1">
+                {contributors.slice(0, 12).map((item) => (
+                  <article key={item.node_id} className="rounded border border-white/10 bg-[#0d1424] p-3">
+                    <p className="font-jetbrains break-all text-[11px] text-emerald-200">{item.node_id}</p>
+                    <p className="mt-1 text-[12px] text-slate-300">
+                      Jobs: {item.jobs_total} | Completed: {item.completed_jobs} | Failed: {item.failed_jobs}
+                    </p>
+                    <p className="text-[12px] text-slate-300">
+                      Success: {item.success_rate}% | Avg Score: {item.avg_machine_score ?? 'N/A'}
+                    </p>
+                    <p className="text-[11px] text-slate-400">Last Seen: {formatUtc(item.last_seen_at)}</p>
+                    <p className="text-[11px] text-slate-400">GPU: {item.gpu_model || 'Unknown'}</p>
+                  </article>
+                ))}
+                {contributors.length === 0 && <p className="text-[12px] text-slate-400">No contributor history yet.</p>}
+              </div>
+            </div>
+
+            <div className="rounded border border-white/10 bg-[#060b14] p-4">
+              <p className="text-[10px] uppercase tracking-[2px] text-slate-500">14-Day Usage Analytics</p>
+              <div className="mt-3 max-h-[320px] overflow-y-auto pr-1">
+                <table className="w-full border-collapse text-left">
+                  <thead>
+                    <tr className="text-[10px] uppercase tracking-[1px] text-slate-500">
+                      <th className="py-2">Date</th>
+                      <th className="py-2">Sub</th>
+                      <th className="py-2">Done</th>
+                      <th className="py-2">Fail</th>
+                      <th className="py-2">Contrib</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analyticsSeries.map((row) => (
+                      <tr key={row.date} className="border-t border-white/10 text-[12px] text-slate-300">
+                        <td className="py-2">{row.date}</td>
+                        <td className="py-2">{row.submitted}</td>
+                        <td className="py-2 text-emerald-200">{row.completed}</td>
+                        <td className="py-2 text-red-300">{row.failed}</td>
+                        <td className="py-2">{row.active_contributors}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {analyticsSeries.length === 0 && <p className="text-[12px] text-slate-400">No analytics data yet.</p>}
+              </div>
             </div>
           </div>
         </div>

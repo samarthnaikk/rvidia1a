@@ -179,3 +179,31 @@ export async function getPeers(token, jobId) {
     headers: buildHeaders(token),
   });
 }
+
+export async function getP2PTelemetry(token) {
+  return request("/p2p/telemetry", {
+    method: "GET",
+    headers: buildHeaders(token),
+  });
+}
+
+export async function getContributorSummaries(token) {
+  return request("/p2p/contributors/summary", {
+    method: "GET",
+    headers: buildHeaders(token),
+  });
+}
+
+export async function getContributorHistory(token, nodeId, limit = 20) {
+  return request(`/p2p/contributors/${nodeId}/history?limit=${limit}`, {
+    method: "GET",
+    headers: buildHeaders(token),
+  });
+}
+
+export async function getDailyAnalytics(token, days = 14) {
+  return request(`/p2p/analytics/daily?days=${days}`, {
+    method: "GET",
+    headers: buildHeaders(token),
+  });
+}

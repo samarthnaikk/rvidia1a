@@ -1,8 +1,9 @@
 import json
+from collections import defaultdict
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -174,6 +175,12 @@ def _marketplace_view(job: Job, current_user: User) -> dict:
         "is_owner": owner,
         "is_requester": requester,
     }
+
+
+def _heartbeat_age_seconds(heartbeat: datetime | None, now: datetime) -> int | None:
+    if heartbeat is None:
+        return None
+    return max(0, int((now - heartbeat).total_seconds()))
 
 
 # ── Marketplace endpoints ─────────────────────────────────────────────────────
@@ -420,6 +427,236 @@ def list_accepted_hosts(
             }
         )
     return {"job_id": job.id, "accepted_hosts": hosts}
+
+
+@router.get("/telemetry")
+def get_telemetry(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    del current_user
+    jobs = db.query(Job).all()
+    now = datetime.utcnow()
+
+    status_counts: dict[str, int] = defaultdict(int)
+    active_hosts = 0
+    active_receivers = 0
+    pending_failovers = 0
+    delivered_artifacts = 0
+    machine_scores: list[float] = []
+
+    for job in jobs:
+        status = str(job.status or "unknown")
+        status_counts[status] += 1
+        if job.artifact_state == "DELIVERED":
+            delivered_artifacts += 1
+        if job.machine_score is not None:
+            machine_scores.append(float(job.machine_score))
+        if job.last_failover_reason and status not in {"completed", "failed"}:
+            pending_failovers += 1
+
+        if job.host_node_id and not _is_stale(job.host_heartbeat_at, now):
+            active_hosts += 1
+        if job.receiver_node_id and not _is_stale(job.receiver_heartbeat_at, now):
+            active_receivers += 1
+
+    avg_machine_score = round(sum(machine_scores) / len(machine_scores), 2) if machine_scores else None
+
+    return {
+        "timestamp": now.isoformat(),
+        "jobs_total": len(jobs),
+        "active_hosts": active_hosts,
+        "active_receivers": active_receivers,
+        "status_counts": dict(status_counts),
+        "pending_failovers": pending_failovers,
+        "delivered_artifacts": delivered_artifacts,
+        "average_machine_score": avg_machine_score,
+    }
+
+
+@router.get("/contributors/summary")
+def get_contributor_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    del current_user
+    now = datetime.utcnow()
+    jobs = (
+        db.query(Job)
+        .filter((Job.latest_host_node_id.isnot(None)) | (Job.host_node_id.isnot(None)))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+
+    by_node: dict[str, dict] = {}
+    for job in jobs:
+        node_id = str(job.latest_host_node_id or job.host_node_id or "").strip()
+        if not node_id:
+            continue
+
+        row = by_node.get(node_id)
+        if row is None:
+            row = {
+                "node_id": node_id,
+                "jobs_total": 0,
+                "completed_jobs": 0,
+                "failed_jobs": 0,
+                "in_progress_jobs": 0,
+                "first_seen_at": job.created_at.isoformat() if job.created_at else None,
+                "last_seen_at": job.updated_at.isoformat() if job.updated_at else None,
+                "last_status": job.status,
+                "gpu_model": job.gpu_model,
+                "avg_machine_score": None,
+                "active_now": False,
+            }
+            row["_score_sum"] = 0.0
+            row["_score_count"] = 0
+            by_node[node_id] = row
+
+        row["jobs_total"] += 1
+        status = str(job.status or "")
+        if status == "completed":
+            row["completed_jobs"] += 1
+        elif status == "failed":
+            row["failed_jobs"] += 1
+        elif status:
+            row["in_progress_jobs"] += 1
+
+        if job.machine_score is not None:
+            row["_score_sum"] += float(job.machine_score)
+            row["_score_count"] += 1
+
+        if job.updated_at and row["last_seen_at"] and job.updated_at.isoformat() > row["last_seen_at"]:
+            row["last_seen_at"] = job.updated_at.isoformat()
+            row["last_status"] = job.status
+            if job.gpu_model:
+                row["gpu_model"] = job.gpu_model
+
+        host_is_live = bool(job.host_node_id == node_id and not _is_stale(job.host_heartbeat_at, now))
+        row["active_now"] = bool(row["active_now"] or host_is_live)
+
+    summary: list[dict] = []
+    for row in by_node.values():
+        total = int(row["jobs_total"])
+        completed = int(row["completed_jobs"])
+        score_count = int(row.pop("_score_count"))
+        score_sum = float(row.pop("_score_sum"))
+        row["success_rate"] = round((completed / total) * 100, 2) if total else 0.0
+        row["avg_machine_score"] = round(score_sum / score_count, 2) if score_count else None
+        summary.append(row)
+
+    summary.sort(key=lambda item: (item.get("completed_jobs", 0), item.get("jobs_total", 0)), reverse=True)
+    return {
+        "timestamp": now.isoformat(),
+        "contributors": summary,
+    }
+
+
+@router.get("/contributors/{node_id}/history")
+def get_contributor_history(
+    node_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    del current_user
+    jobs = (
+        db.query(Job)
+        .filter((Job.latest_host_node_id == node_id) | (Job.host_node_id == node_id))
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    history = [
+        {
+            "job_id": job.id,
+            "repo_url": job.repo_url,
+            "branch": job.branch,
+            "status": job.status,
+            "access_status": job.access_status,
+            "machine_score": job.machine_score,
+            "failover_count": job.failover_count,
+            "checkpoint_phase": job.checkpoint_phase,
+            "artifact_state": job.artifact_state,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        }
+        for job in jobs
+    ]
+
+    return {
+        "node_id": node_id,
+        "count": len(history),
+        "history": history,
+    }
+
+
+@router.get("/analytics/daily")
+def get_daily_analytics(
+    days: int = Query(default=14, ge=3, le=90),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    del current_user
+    now = datetime.utcnow().date()
+    start = now - timedelta(days=days - 1)
+    jobs = (
+        db.query(Job)
+        .filter(Job.created_at >= datetime.combine(start, datetime.min.time()))
+        .order_by(Job.created_at.asc())
+        .all()
+    )
+
+    buckets: dict[str, dict] = {}
+    for offset in range(days):
+        day = start + timedelta(days=offset)
+        key = day.isoformat()
+        buckets[key] = {
+            "date": key,
+            "submitted": 0,
+            "completed": 0,
+            "failed": 0,
+            "contributors": set(),
+            "avg_machine_score": None,
+            "_score_sum": 0.0,
+            "_score_count": 0,
+        }
+
+    for job in jobs:
+        if not job.created_at:
+            continue
+        key = job.created_at.date().isoformat()
+        if key not in buckets:
+            continue
+        row = buckets[key]
+        row["submitted"] += 1
+        status = str(job.status or "")
+        if status == "completed":
+            row["completed"] += 1
+        elif status == "failed":
+            row["failed"] += 1
+
+        node_id = str(job.latest_host_node_id or job.host_node_id or "").strip()
+        if node_id:
+            row["contributors"].add(node_id)
+
+        if job.machine_score is not None:
+            row["_score_sum"] += float(job.machine_score)
+            row["_score_count"] += 1
+
+    items: list[dict] = []
+    for row in buckets.values():
+        score_count = int(row.pop("_score_count"))
+        score_sum = float(row.pop("_score_sum"))
+        row["active_contributors"] = len(row.pop("contributors"))
+        row["avg_machine_score"] = round(score_sum / score_count, 2) if score_count else None
+        items.append(row)
+
+    return {
+        "days": days,
+        "series": items,
+    }
 
 
 # ── Node registration ─────────────────────────────────────────────────────────
