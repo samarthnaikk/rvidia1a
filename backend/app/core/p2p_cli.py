@@ -388,6 +388,7 @@ async def _host_execute_docker(
     repo_url: str,
     branch: str,
     docker_args: str,
+    prefer_gpu: bool,
 ) -> None:
     """Clone repo, docker build+run inside /outputs volume, ship artifacts back."""
     workspace_dir = Path(args.workspace) / args.job_id
@@ -458,36 +459,36 @@ async def _host_execute_docker(
     run_captured: list[str] = []
     execution_mode = "GPU"
 
-    # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
-    gpu_args = _build_run_args(use_gpu=True)
-    run_proc, run_logs, run_captured = await _run_command_with_logs(
-        " ".join(gpu_args), workspace_dir
-    )
-    async for line in run_logs:
-        print(f"[docker run] {line}")
-    run_rc = await run_proc.wait()
+    if prefer_gpu:
+        # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
+        gpu_first = _build_run_cmd(use_gpu=True)
+        run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
+        async for line in run_logs:
+            print(f"[docker run] {line}")
+        run_rc = await run_proc.wait()
+    else:
+        print("[RVIDIA] No GPU detected; running container in CPU mode.")
+        cpu_cmd = _build_run_cmd(use_gpu=False)
+        run_proc, run_logs, run_captured = await _run_command_with_logs(cpu_cmd, workspace_dir)
+        async for line in run_logs:
+            print(f"[docker run] {line}")
+        run_rc = await run_proc.wait()
 
     if run_rc != 0:
-        combined = "\n".join(run_captured)
-        if _is_gpu_runtime_unavailable(combined):
-            matched = next(
-                (s for s in [
-                    "could not select device driver", "capabilities: [[gpu]]",
-                    "nvidia-container-cli: initialization error",
-                    "wsl environment detected but no adapters were found",
-                    "no cuda-capable device", "unknown runtime specified nvidia",
-                    "could not load nvml",
-                ] if s in combined.lower()),
-                "gpu-unavailable signal",
-            )
-            print(
-                f"[RVIDIA] GPU runtime unavailable on this host; retrying without --gpus all "
-                f"(matched: '{matched}')"
-            )
-            cpu_args = _build_run_args(use_gpu=False)
-            cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(
-                " ".join(cpu_args), workspace_dir
-            )
+        combined = "\n".join(run_captured).lower()
+        gpu_error_markers = [
+            "could not select device driver",
+            "capabilities: [[gpu]]",
+            "nvidia-container-cli",
+            "wsl environment detected but no adapters were found",
+            "error running prestart hook",
+            "failed to create shim task",
+        ]
+        gpu_unavailable = any(marker in combined for marker in gpu_error_markers)
+        if gpu_unavailable:
+            print("[RVIDIA] Docker GPU runtime unavailable; retrying container without GPU flags.")
+            cpu_fallback = _build_run_cmd(use_gpu=False)
+            cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(cpu_fallback, workspace_dir)
             async for line in cpu_logs:
                 print(f"[docker run] {line}")
             run_rc = await cpu_proc.wait()
@@ -651,6 +652,7 @@ async def run_host(args):
                 repo_url=repo_url,
                 branch=branch,
                 docker_args=docker_args,
+                prefer_gpu=bool(gpu_info.get("gpu_model")),
             )
             running_container = None
             break  # Job done — exit loop.
