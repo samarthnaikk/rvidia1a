@@ -12,6 +12,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
   const renterJobId = latestOwnedJob?.id || '<CREATE_JOB_FIRST>'
   const renterRepoUrl = latestOwnedJob?.repo_url || '<REPO_URL>'
   const renterBranch = latestOwnedJob?.branch || 'main'
+  const canShowRenterRunCommand = latestOwnedJob?.access_status === 'accepted'
   const renterRunCommand =
     `python -m app.core.p2p_cli receiver --api-base ${defaultApiBase} --token ${tokenForCmd} ` +
     `--job-id ${renterJobId} --repo-url "${renterRepoUrl}" --branch "${renterBranch}"`
@@ -161,9 +162,11 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
 
               <div className="rounded border border-white/10 bg-[#060b14] p-3">
                 <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Renter Run Command (After Job Creation)</p>
-                <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                  {renterRunCommand}
-                </p>
+                {canShowRenterRunCommand ? (
+                  <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">{renterRunCommand}</p>
+                ) : (
+                  <p className="mt-2 text-[12px] text-slate-400">Command will appear after access is accepted.</p>
+                )}
               </div>
             </div>
           </div>
@@ -218,12 +221,19 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                     </button>
                   )}
 
-                  <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
-                    <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Accept Command</p>
-                    <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                      {`python -m app.core.p2p_cli host --api-base ${defaultApiBase} --token ${tokenForCmd} --job-id ${job.job_id}`}
-                    </p>
-                  </div>
+                  {job.access_status === 'accepted' ? (
+                    <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                      <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Accept Command</p>
+                      <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
+                        {`python -m app.core.p2p_cli host --api-base ${defaultApiBase} --token ${tokenForCmd} --job-id ${job.job_id}`}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                      <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Command</p>
+                      <p className="mt-2 text-[12px] text-slate-400">Command will appear after access is accepted.</p>
+                    </div>
+                  )}
 
                   {job.can_accept && (
                     <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
