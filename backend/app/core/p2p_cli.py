@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+import iroh
+
 from app.core.rvidia_core import RvidiaNode, WorkspaceManager
 
 
@@ -229,6 +231,78 @@ async def _run_command_with_logs(command: str, cwd: Path):
     return proc, lines(), captured
 
 
+class _DownloadCallback:
+    async def progress(self, _progress):
+        return None
+
+
+def _blobs_from_node(node: RvidiaNode) -> Any:
+    owner = node._endpoint_owner
+    if owner is None:
+        raise RuntimeError("iroh owner/client is unavailable")
+    blobs_getter = getattr(owner, "blobs", None)
+    if not callable(blobs_getter):
+        raise RuntimeError("iroh client does not expose blobs API")
+    return blobs_getter()
+
+
+async def _share_file_ticket(node: RvidiaNode, file_path: Path) -> str:
+    blobs: Any = _blobs_from_node(node)
+    content = file_path.read_bytes()
+    outcome = await blobs.add_bytes_named(content, file_path.name)
+    ticket = await blobs.share(outcome.hash, iroh.BlobFormat.RAW, iroh.AddrInfoOptions.RELAY_AND_ADDRESSES)
+    return str(ticket)
+
+
+async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_path: Path) -> Path:
+    blobs: Any = _blobs_from_node(node)
+    ticket = iroh.BlobTicket(ticket_str)
+    await blobs.download(ticket.hash(), ticket.as_download_options(), _DownloadCallback())
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    await blobs.write_to_path(ticket.hash(), str(output_path))
+    return output_path
+
+
+def _push_signal(
+    api_base: str,
+    token: str,
+    job_id: str,
+    from_node_id: str,
+    to_node_id: str,
+    message: dict[str, Any],
+) -> None:
+    _api_post(
+        api_base,
+        f"/p2p/jobs/{job_id}/offer",
+        token,
+        {
+            "from_node_id": from_node_id,
+            "to_node_id": to_node_id,
+            "offer": json.dumps(message),
+        },
+    )
+
+
+def _pull_signals(api_base: str, token: str, job_id: str, node_id: str) -> list[dict[str, Any]]:
+    payload = _api_get(api_base, f"/p2p/jobs/{job_id}/signals?node_id={node_id}", token)
+    signals = payload.get("signals", [])
+    parsed: list[dict[str, Any]] = []
+    for signal in signals:
+        raw_offer = signal.get("offer")
+        if not isinstance(raw_offer, str):
+            continue
+        try:
+            parsed_offer = json.loads(raw_offer)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed_offer, dict):
+            continue
+        parsed_offer["from_node_id"] = signal.get("from_node_id")
+        parsed_offer["to_node_id"] = signal.get("to_node_id")
+        parsed.append(parsed_offer)
+    return parsed
+
+
 async def run_host(args):
     workspace = WorkspaceManager(args.workspace)
     node = RvidiaNode(workspace)
@@ -241,19 +315,24 @@ async def run_host(args):
         {"node_id": node_id},
     )
     print(f"HOST_NODE_ID={node_id}")
-    print("Host waiting for incoming peer stream...")
+    print("Host waiting for renter ticket signal...")
 
-    if node.endpoint is None:
-        raise RuntimeError("iroh endpoint not initialized")
+    incoming: dict[str, Any] | None = None
+    while incoming is None:
+        for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
+            if signal.get("type") == "input_ticket":
+                incoming = signal
+                break
+        if incoming is None:
+            await asyncio.sleep(2)
 
-    if not _has_incoming_api(node.endpoint):
-        raise RuntimeError(
-            "Installed iroh bindings do not expose inbound stream APIs (accept/listen). "
-            "Use iroh==0.31.0 in both host and receiver environments, reinstall dependencies, "
-            "then run the dashboard commands again."
-        )
+    receiver_node_id = str(incoming.get("from_node_id") or "")
+    input_ticket = str(incoming.get("input_ticket") or "")
+    input_filename = str(incoming.get("filename") or "input.bin")
+    command_template = str(incoming.get("command") or "")
 
-    stream = await _accept_stream(node.endpoint, node.alpn)
+    if not receiver_node_id or not input_ticket or not command_template:
+        raise RuntimeError("Invalid input_ticket signal payload")
 
     _api_patch(
         args.api_base,
@@ -262,20 +341,40 @@ async def run_host(args):
         {"status": "running", "error_message": None},
     )
 
-    task, received_file = await node.host_prepare_and_receive(stream)
-    workspace_dir = received_file.parent
-    command = task.command.replace("{input}", received_file.name)
+    workspace_dir = Path(args.workspace) / args.job_id
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    received_file = await _download_ticket_to_path(node, input_ticket, workspace_dir / input_filename)
 
-    print(f"Executing command for task {task.task_id}: {command}")
-    proc, log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
-    await node.stream_logs(stream, log_source)
+    command = command_template.replace("{input}", received_file.name)
+    print(f"Executing command for task {args.job_id}: {command}")
+    proc, _log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
     return_code = await proc.wait()
 
     artifact = workspace_dir / "artifact.txt"
     artifact.write_text("\n".join(captured_lines), encoding="utf-8")
 
+    logs_file = workspace_dir / "execution.log"
+    logs_file.write_text("\n".join(captured_lines), encoding="utf-8")
+
+    artifact_ticket = await _share_file_ticket(node, artifact)
+    logs_ticket = await _share_file_ticket(node, logs_file)
+
     success = return_code == 0
-    await node.host_finalize(stream, task.task_id, success=success, artifact_path=artifact)
+    _push_signal(
+        api_base=args.api_base,
+        token=args.token,
+        job_id=args.job_id,
+        from_node_id=node_id,
+        to_node_id=receiver_node_id,
+        message={
+            "type": "result_ticket",
+            "success": success,
+            "artifact_ticket": artifact_ticket,
+            "artifact_name": artifact.name,
+            "logs_ticket": logs_ticket,
+            "error_message": None if success else f"Command exited with code {return_code}",
+        },
+    )
 
     _api_post(
         args.api_base,
@@ -316,8 +415,6 @@ async def run_receiver(args):
     if node.endpoint is None:
         raise RuntimeError("iroh endpoint not initialized")
 
-    stream = await _connect_stream(node.endpoint, host_node_id, node.alpn)
-
     _api_patch(
         args.api_base,
         f"/jobs/{args.job_id}/status",
@@ -325,20 +422,48 @@ async def run_receiver(args):
         {"status": "transferring", "error_message": None},
     )
 
-    await node.renter_send_task(
-        stream=stream,
-        command=args.command,
-        file_path=Path(args.file_path),
-        task_id=args.job_id,
+    input_path = Path(args.file_path)
+    input_ticket = await _share_file_ticket(node, input_path)
+    _push_signal(
+        api_base=args.api_base,
+        token=args.token,
+        job_id=args.job_id,
+        from_node_id=node_id,
+        to_node_id=host_node_id,
+        message={
+            "type": "input_ticket",
+            "input_ticket": input_ticket,
+            "filename": input_path.name,
+            "command": args.command,
+        },
     )
 
-    await node.listen_logs(stream)
-    completion, artifact_path = await node.renter_wait_for_finalization(
-        stream,
-        artifact_dir=Path(args.output_dir),
-    )
+    result: dict[str, Any] | None = None
+    while result is None:
+        for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
+            if signal.get("type") == "result_ticket":
+                result = signal
+                break
+        if result is None:
+            await asyncio.sleep(2)
 
-    success = bool(completion.get("success"))
+    artifact_ticket = str(result.get("artifact_ticket") or "")
+    logs_ticket = str(result.get("logs_ticket") or "")
+    success = bool(result.get("success"))
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    artifact_path: Path | None = None
+    if artifact_ticket:
+        artifact_name = str(result.get("artifact_name") or "artifact.txt")
+        artifact_path = await _download_ticket_to_path(node, artifact_ticket, output_dir / artifact_name)
+
+    if logs_ticket:
+        logs_path = await _download_ticket_to_path(node, logs_ticket, output_dir / "execution.log")
+        for line in logs_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            print(f"Remote GPU > {line}")
+
     _api_post(
         args.api_base,
         f"/jobs/{args.job_id}/complete",
@@ -347,7 +472,7 @@ async def run_receiver(args):
             "success": success,
             "artifact_name": artifact_path.name if artifact_path else None,
             "artifact_path": str(artifact_path) if artifact_path else None,
-            "error_message": None if success else "Remote execution failed",
+            "error_message": None if success else str(result.get("error_message") or "Remote execution failed"),
         },
     )
 

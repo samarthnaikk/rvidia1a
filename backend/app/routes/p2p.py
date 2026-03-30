@@ -99,7 +99,7 @@ def push_offer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job_for_user(job_id, current_user.id, db)
+    _get_job(job_id, db)
     _queue_signal(
         job_id,
         {
@@ -119,7 +119,7 @@ def push_answer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job_for_user(job_id, current_user.id, db)
+    _get_job(job_id, db)
     _queue_signal(
         job_id,
         {
@@ -139,7 +139,7 @@ def push_candidate(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job_for_user(job_id, current_user.id, db)
+    _get_job(job_id, db)
     _queue_signal(
         job_id,
         {
@@ -159,7 +159,7 @@ def pull_signals(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_job_for_user(job_id, current_user.id, db)
+    _get_job(job_id, db)
     queue = _SIGNALS.get(job_id, [])
     deliver: list[dict] = []
     remaining: list[dict] = []
