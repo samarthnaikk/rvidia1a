@@ -37,7 +37,7 @@ def _build_api_url(api_base: str, path: str, with_api_prefix: bool = False) -> s
     return f"{base}{normalized_path}"
 
 
-def _api_request(method: str, api_base: str, path: str, token: str, payload: dict | None = None) -> dict:
+def _api_request(method: str, api_base: str, path: str, token: str, payload: dict | None = None) -> Any:
     encoded_body = None
     if payload is not None:
         encoded_body = json.dumps(payload).encode("utf-8")
@@ -97,16 +97,38 @@ def _api_request(method: str, api_base: str, path: str, token: str, payload: dic
         ) from exc
 
 
-def _api_post(api_base: str, path: str, token: str, payload: dict) -> dict:
+def _api_post(api_base: str, path: str, token: str, payload: dict) -> Any:
     return _api_request("POST", api_base, path, token, payload)
 
 
-def _api_patch(api_base: str, path: str, token: str, payload: dict) -> dict:
+def _api_patch(api_base: str, path: str, token: str, payload: dict) -> Any:
     return _api_request("PATCH", api_base, path, token, payload)
 
 
-def _api_get(api_base: str, path: str, token: str) -> dict:
+def _api_get(api_base: str, path: str, token: str) -> Any:
     return _api_request("GET", api_base, path, token)
+
+
+def _list_marketplace_jobs(api_base: str, token: str) -> list[dict[str, Any]]:
+    payload = _api_get(api_base, "/p2p/jobs", token)
+    return payload if isinstance(payload, list) else []
+
+
+def _get_access_state(api_base: str, token: str, job_id: str) -> dict[str, Any]:
+    payload = _api_get(api_base, f"/p2p/jobs/{job_id}/access", token)
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _wait_for_access_accepted(api_base: str, token: str, job_id: str) -> None:
+    while True:
+        state = _get_access_state(api_base, token, job_id)
+        status = str(state.get("access_status") or "")
+        if status == "accepted":
+            return
+        if status == "open":
+            raise RuntimeError("Access request is still open; requester must call request-access first")
+        print(f"[RVIDIA] Waiting for access acceptance (current: {status or 'unknown'})...")
+        await asyncio.sleep(2)
 
 
 # ── GPU Detection ─────────────────────────────────────────────────────────────
@@ -445,12 +467,51 @@ async def run_host(args):
     gpu_info = _detect_gpu()
     print(f"[RVIDIA] GPU: {gpu_info.get('gpu_model') or 'not detected'}")
 
-    _api_post(
-        args.api_base,
-        f"/p2p/jobs/{args.job_id}/register-host",
-        args.token,
-        {"node_id": node_id, **gpu_info},
-    )
+    legacy_access_mode = False
+    try:
+        state = _get_access_state(args.api_base, args.token, args.job_id)
+    except RuntimeError as exc:
+        details = str(exc)
+        if '"detail":"Not Found"' in details or '"detail": "Not Found"' in details:
+            legacy_access_mode = True
+            state = {}
+            print(
+                "[RVIDIA] Access-handshake endpoints are unavailable on target backend; using legacy host flow.",
+                file=sys.stderr,
+            )
+        elif "API error 404" in details:
+            try:
+                jobs = _list_marketplace_jobs(args.api_base, args.token)
+            except RuntimeError:
+                jobs = []
+            known_ids = [str(j.get("job_id")) for j in jobs if j.get("job_id")]
+            msg = f"Job '{args.job_id}' was not found."
+            if known_ids:
+                msg += f" Available marketplace jobs: {', '.join(known_ids[:10])}"
+            raise RuntimeError(msg) from exc
+        else:
+            raise
+
+    if (not legacy_access_mode) and (not bool(state.get("is_owner"))):
+        if bool(args.request_access) and str(state.get("access_status") or "") == "open":
+            _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/request-access", args.token, {})
+            print("[RVIDIA] Access requested; waiting for owner acceptance...")
+        await _wait_for_access_accepted(args.api_base, args.token, args.job_id)
+
+    try:
+        _api_post(
+            args.api_base,
+            f"/p2p/jobs/{args.job_id}/register-host",
+            args.token,
+            {"node_id": node_id, **gpu_info},
+        )
+    except RuntimeError as exc:
+        if "Job not found" in str(exc):
+            raise RuntimeError(
+                f"Job '{args.job_id}' was not found on {args.api_base}. "
+                "Use the job ID from the same backend environment and account token."
+            ) from exc
+        raise
     print(f"HOST_NODE_ID={node_id}")
     print("[RVIDIA] Host waiting for renter repo signal...")
 
@@ -509,12 +570,20 @@ async def run_receiver(args):
     node = RvidiaNode(workspace)
     node_id = await node.initialize(secret_key=args.secret_key)
 
-    _api_post(
-        args.api_base,
-        f"/p2p/jobs/{args.job_id}/register-receiver",
-        args.token,
-        {"node_id": node_id},
-    )
+    try:
+        _api_post(
+            args.api_base,
+            f"/p2p/jobs/{args.job_id}/register-receiver",
+            args.token,
+            {"node_id": node_id},
+        )
+    except RuntimeError as exc:
+        if "Access must be accepted" in str(exc):
+            raise RuntimeError(
+                "Receiver cannot start yet: access is not accepted. "
+                "Owner must run: python -m app.core.p2p_cli accept-access --api-base ... --token ... --job-id ..."
+            ) from exc
+        raise
     print(f"RECEIVER_NODE_ID={node_id}")
 
     host_node_id = args.host_node_id
@@ -602,6 +671,16 @@ async def run_receiver(args):
     print(f"[RVIDIA] Receiver completed task {args.job_id}.")
 
 
+async def run_request_access(args):
+    payload = _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/request-access", args.token, {})
+    print(json.dumps(payload, indent=2))
+
+
+async def run_accept_access(args):
+    payload = _api_post(args.api_base, f"/p2p/jobs/{args.job_id}/accept-access", args.token, {})
+    print(json.dumps(payload, indent=2))
+
+
 # ── CLI parser ────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -616,6 +695,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--secret-key", default=None, help="Optional iroh secret key")
 
     host = subparsers.add_parser("host", parents=[common], help="Start host and execute incoming Docker job")
+    host.add_argument(
+        "--request-access",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Request access before host registration when job is not owned by this user",
+    )
     host.set_defaults(handler=run_host)
 
     receiver = subparsers.add_parser("receiver", parents=[common], help="Submit a GitHub repo job to a remote host")
@@ -625,6 +710,12 @@ def build_parser() -> argparse.ArgumentParser:
     receiver.add_argument("--docker-args", default="", help="Extra docker run arguments (e.g. '-e API_KEY=123 -p 8080:8080')")
     receiver.add_argument("--output-dir", default="./outputs", help="Directory to write returned artifacts")
     receiver.set_defaults(handler=run_receiver)
+
+    request_access = subparsers.add_parser("request-access", parents=[common], help="Request access to a job")
+    request_access.set_defaults(handler=run_request_access)
+
+    accept_access = subparsers.add_parser("accept-access", parents=[common], help="Accept an access request for your job")
+    accept_access.set_defaults(handler=run_accept_access)
 
     return parser
 

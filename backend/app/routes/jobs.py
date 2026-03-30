@@ -56,6 +56,7 @@ def list_open_jobs(
 ):
     return (
         db.query(Job)
+        .filter(Job.user_id == current_user.id)
         .filter(Job.status.in_(["queued", "awaiting_receiver", "ready_for_transfer", "transferring"]))
         .order_by(Job.created_at.desc())
         .all()

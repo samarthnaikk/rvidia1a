@@ -76,6 +76,36 @@ export async function listOpenJobs(token) {
   });
 }
 
+export async function listMarketplaceJobs(token) {
+  return request("/p2p/jobs", {
+    method: "GET",
+    headers: buildHeaders(token),
+  });
+}
+
+export async function requestJobAccess(token, jobId) {
+  return request(`/p2p/jobs/${jobId}/request-access`, {
+    method: "POST",
+    headers: buildHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function acceptJobAccess(token, jobId) {
+  return request(`/p2p/jobs/${jobId}/accept-access`, {
+    method: "POST",
+    headers: buildHeaders(token),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function getJobAccessState(token, jobId) {
+  return request(`/p2p/jobs/${jobId}/access`, {
+    method: "GET",
+    headers: buildHeaders(token),
+  });
+}
+
 export async function getJob(token, jobId) {
   return request(`/jobs/${jobId}`, {
     method: "GET",

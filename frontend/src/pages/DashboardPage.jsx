@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { listJobs, listOpenJobs } from '../lib/api'
+import { acceptJobAccess, listJobs, listMarketplaceJobs, requestJobAccess } from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const defaultApiBase = 'http://157.180.74.2'
-  const [openJobs, setOpenJobs] = useState([])
+  const [marketplaceJobs, setMarketplaceJobs] = useState([])
   const [myJobs, setMyJobs] = useState([])
   const [hostError, setHostError] = useState('')
   const [rentError, setRentError] = useState('')
@@ -16,31 +16,49 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
     `python -m app.core.p2p_cli receiver --api-base ${defaultApiBase} --token ${tokenForCmd} ` +
     `--job-id ${renterJobId} --repo-url "${renterRepoUrl}" --branch "${renterBranch}"`
 
+  const refreshMarketplace = async (active) => {
+    try {
+      const jobs = await listMarketplaceJobs(authToken)
+      if (active) {
+        setMarketplaceJobs(jobs)
+        setHostError('')
+      }
+    } catch (error) {
+      if (active) {
+        setHostError(error.message)
+      }
+    }
+  }
+
   useEffect(() => {
     let active = true
 
-    const loadOpenJobs = async () => {
-      try {
-        const jobs = await listOpenJobs(authToken)
-        if (active) {
-          setOpenJobs(jobs)
-          setHostError('')
-        }
-      } catch (error) {
-        if (active) {
-          setHostError(error.message)
-        }
-      }
-    }
-
-    loadOpenJobs()
-    const intervalId = setInterval(loadOpenJobs, 5000)
+    refreshMarketplace(active)
+    const intervalId = setInterval(() => refreshMarketplace(active), 5000)
 
     return () => {
       active = false
       clearInterval(intervalId)
     }
   }, [authToken])
+
+  const handleRequestAccess = async (jobId) => {
+    try {
+      await requestJobAccess(authToken, jobId)
+      await refreshMarketplace(true)
+    } catch (error) {
+      setHostError(error.message)
+    }
+  }
+
+  const handleAcceptAccess = async (jobId) => {
+    try {
+      await acceptJobAccess(authToken, jobId)
+      await refreshMarketplace(true)
+    } catch (error) {
+      setHostError(error.message)
+    }
+  }
 
   useEffect(() => {
     let active = true
@@ -146,31 +164,60 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
           <div className="rounded-[12px] border border-white/15 bg-[#0b1322c9] p-6">
             <p className="text-[10px] uppercase tracking-[3px] text-emerald-300/75">Operational Mode</p>
             <h2 className="mt-3 text-[34px] font-bold uppercase tracking-[1px] text-slate-100">Host Compute</h2>
-            <p className="mt-2 text-[15px] text-slate-400">Open jobs are visible below. Accept any job using terminal commands only.</p>
+            <p className="mt-2 text-[15px] text-slate-400">Marketplace visibility is controlled by bilateral request/accept.</p>
 
             {hostError && <p className="mt-4 text-[12px] text-red-300">{hostError}</p>}
 
             <div className="mt-6 space-y-4">
-              {openJobs.map((job) => (
-                <article className="rounded border border-white/15 bg-[#08101d] p-4" key={job.id}>
+              {marketplaceJobs.map((job) => (
+                <article className="rounded border border-white/15 bg-[#08101d] p-4" key={job.job_id}>
                   <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Open Job</p>
-                  <p className="font-jetbrains mt-1 break-all text-[12px] text-slate-200">{job.id}</p>
+                  <p className="font-jetbrains mt-1 break-all text-[12px] text-slate-200">{job.job_id}</p>
                   <p className="mt-2 text-[12px] text-slate-300">Owner: user #{job.user_id}</p>
                   <p className="text-[12px] text-slate-300">Repo: {job.repo_url || 'Not provided'}</p>
                   <p className="text-[12px] text-slate-300">Branch: {job.branch || 'main'}</p>
-                  <p className="text-[12px] text-slate-300">Command: {job.command}</p>
                   <p className="text-[12px] text-emerald-200">Status: {job.status}</p>
+                  <p className="text-[12px] text-slate-300">Access: {job.access_status}</p>
+
+                  {job.can_request && (
+                    <button
+                      className="mt-3 rounded border border-emerald-200/70 bg-[#95f2bd] px-3 py-2 text-[11px] font-bold uppercase tracking-[2px] text-[#0b2d1e]"
+                      onClick={() => handleRequestAccess(job.job_id)}
+                      type="button"
+                    >
+                      Request Access
+                    </button>
+                  )}
+
+                  {job.can_accept && (
+                    <button
+                      className="mt-3 rounded border border-emerald-200/70 bg-[#95f2bd] px-3 py-2 text-[11px] font-bold uppercase tracking-[2px] text-[#0b2d1e]"
+                      onClick={() => handleAcceptAccess(job.job_id)}
+                      type="button"
+                    >
+                      Accept Access
+                    </button>
+                  )}
 
                   <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
                     <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Accept Command</p>
                     <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                      {`python -m app.core.p2p_cli host --api-base ${defaultApiBase} --token ${tokenForCmd} --job-id ${job.id}`}
+                      {`python -m app.core.p2p_cli host --api-base ${defaultApiBase} --token ${tokenForCmd} --job-id ${job.job_id}`}
                     </p>
                   </div>
+
+                  {job.can_accept && (
+                    <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                      <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Owner CLI Accept Command</p>
+                      <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
+                        {`python -m app.core.p2p_cli accept-access --api-base ${defaultApiBase} --token ${tokenForCmd} --job-id ${job.job_id}`}
+                      </p>
+                    </div>
+                  )}
                 </article>
               ))}
 
-              {openJobs.length === 0 && (
+              {marketplaceJobs.length === 0 && (
                 <p className="text-[13px] text-slate-400">No open jobs currently available for hosting.</p>
               )}
             </div>
