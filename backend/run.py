@@ -17,8 +17,14 @@ def ensure_jobs_schema() -> None:
         "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS gpu_driver VARCHAR",
         "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS access_status VARCHAR NOT NULL DEFAULT 'open'",
         "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS access_requested_by INTEGER",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS latest_host_node_id VARCHAR",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS latest_receiver_node_id VARCHAR",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS artifact_state VARCHAR NOT NULL DEFAULT 'PENDING'",
         "UPDATE jobs SET branch = 'main' WHERE branch IS NULL",
         "UPDATE jobs SET access_status = 'open' WHERE access_status IS NULL",
+        "UPDATE jobs SET session_version = 1 WHERE session_version IS NULL",
+        "UPDATE jobs SET artifact_state = 'PENDING' WHERE artifact_state IS NULL",
     ]
     with engine.begin() as connection:
         for statement in statements:

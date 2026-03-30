@@ -16,7 +16,10 @@ def get_current_user(
     db: Session = Depends(get_db),
 ):
     token = credentials.credentials
-    payload = decode_access_token(token)
+    try:
+        payload = decode_access_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
     user_id = payload.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
