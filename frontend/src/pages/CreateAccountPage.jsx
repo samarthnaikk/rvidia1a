@@ -46,7 +46,12 @@ function CreateAccountPage({ onBackToLogin, onCreateAccountSuccess }) {
       <div className="relative z-10 border-r border-r-white/10 bg-black px-9 pb-10 pt-28 lg:px-[72px]">
         <div className="mb-14 flex items-center gap-3">
           <div className="grid h-9 w-9 place-items-center rounded border border-emerald-300/45 bg-emerald-300/10 shadow-[0_0_18px_rgba(110,231,183,0.14)]">
-            <span className="text-emerald-300">⌁</span>
+            <div className="grid grid-cols-2 gap-[2px]">
+              <span className="h-[5px] w-[5px] rounded-[1px] bg-emerald-300" />
+              <span className="h-[5px] w-[5px] rounded-[1px] bg-emerald-300/70" />
+              <span className="h-[5px] w-[5px] rounded-[1px] bg-emerald-300/70" />
+              <span className="h-[5px] w-[5px] rounded-[1px] bg-emerald-300" />
+            </div>
           </div>
           <p className="text-[29px] font-bold tracking-[2px] text-emerald-300">RVIDIA</p>
         </div>
