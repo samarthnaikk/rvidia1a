@@ -1,10 +1,19 @@
 import { useEffect, useState } from 'react'
-import { acceptJobAccess, listJobs, listMarketplaceJobs, requestJobAccess } from '../lib/api'
+import {
+  acceptJobAccess,
+  listAcceptedHosts,
+  listJobAccessRequests,
+  listJobs,
+  listMarketplaceJobs,
+  requestJobAccess,
+} from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const defaultApiBase = 'http://157.180.74.2'
   const [marketplaceJobs, setMarketplaceJobs] = useState([])
   const [myJobs, setMyJobs] = useState([])
+  const [accessRequestsByJob, setAccessRequestsByJob] = useState({})
+  const [acceptedHostsByJob, setAcceptedHostsByJob] = useState({})
   const [hostError, setHostError] = useState('')
   const [rentError, setRentError] = useState('')
   const tokenForCmd = authToken || 'MISSING_TOKEN'
@@ -16,6 +25,54 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
     `python -m app.core.p2p_cli receiver --api-base ${defaultApiBase} --token ${tokenForCmd} ` +
     `--job-id ${renterJobId} --repo-url "${renterRepoUrl}" --branch "${renterBranch}"`
 
+  const isOwnerOfJob = (job) => {
+    if (typeof job?.is_owner === 'boolean') {
+      return job.is_owner
+    }
+    if (currentUser?.id == null || job?.user_id == null) {
+      return false
+    }
+    return Number(currentUser.id) === Number(job.user_id)
+  }
+
+  const refreshOwnerRequestPanels = async (jobs, active) => {
+    const ownerJobs = jobs.filter((job) => isOwnerOfJob(job))
+    if (ownerJobs.length === 0) {
+      if (active) {
+        setAccessRequestsByJob({})
+        setAcceptedHostsByJob({})
+      }
+      return
+    }
+
+    const requestEntries = await Promise.all(
+      ownerJobs.map(async (job) => {
+        try {
+          const data = await listJobAccessRequests(authToken, job.job_id)
+          return [job.job_id, data.requests || []]
+        } catch {
+          return [job.job_id, []]
+        }
+      }),
+    )
+
+    const acceptedEntries = await Promise.all(
+      ownerJobs.map(async (job) => {
+        try {
+          const data = await listAcceptedHosts(authToken, job.job_id)
+          return [job.job_id, data.accepted_hosts || []]
+        } catch {
+          return [job.job_id, []]
+        }
+      }),
+    )
+
+    if (active) {
+      setAccessRequestsByJob(Object.fromEntries(requestEntries))
+      setAcceptedHostsByJob(Object.fromEntries(acceptedEntries))
+    }
+  }
+
   const refreshMarketplace = async (active) => {
     try {
       const jobs = await listMarketplaceJobs(authToken)
@@ -23,6 +80,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
         setMarketplaceJobs(jobs)
         setHostError('')
       }
+      await refreshOwnerRequestPanels(jobs, active)
     } catch (error) {
       if (active) {
         setHostError(error.message)
@@ -40,7 +98,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
       active = false
       clearInterval(intervalId)
     }
-  }, [authToken])
+  }, [authToken, currentUser?.id])
 
   const handleRequestAccess = async (jobId) => {
     try {
@@ -51,9 +109,9 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
     }
   }
 
-  const handleAcceptAccess = async (jobId) => {
+  const handleAcceptAccess = async (jobId, requesterUserId = null) => {
     try {
-      await acceptJobAccess(authToken, jobId)
+      await acceptJobAccess(authToken, jobId, requesterUserId)
       await refreshMarketplace(true)
     } catch (error) {
       setHostError(error.message)
@@ -169,7 +227,9 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
             {hostError && <p className="mt-4 text-[12px] text-red-300">{hostError}</p>}
 
             <div className="mt-6 space-y-4">
-              {marketplaceJobs.map((job) => (
+              {marketplaceJobs.map((job) => {
+                const isOwner = isOwnerOfJob(job)
+                return (
                 <article className="rounded border border-white/15 bg-[#08101d] p-4" key={job.job_id}>
                   <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Open Job</p>
                   <p className="font-jetbrains mt-1 break-all text-[12px] text-slate-200">{job.job_id}</p>
@@ -189,7 +249,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                     </button>
                   )}
 
-                  {job.can_accept && (
+                  {job.can_accept && !isOwner && (
                     <button
                       className="mt-3 rounded border border-emerald-200/70 bg-[#95f2bd] px-3 py-2 text-[11px] font-bold uppercase tracking-[2px] text-[#0b2d1e]"
                       onClick={() => handleAcceptAccess(job.job_id)}
@@ -197,6 +257,77 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                     >
                       Accept Access
                     </button>
+                  )}
+
+                  {isOwner && (
+                    <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                      <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Access Requests</p>
+                      {(accessRequestsByJob[job.job_id] || []).length === 0 && (
+                        <p className="mt-2 text-[12px] text-slate-400">No requester yet.</p>
+                      )}
+                      {(accessRequestsByJob[job.job_id] || []).length > 0 && (
+                        <div className="mt-3 overflow-x-auto rounded border border-white/10">
+                          <table className="min-w-full text-left text-[12px] text-slate-300">
+                            <thead className="bg-[#0a1324] text-[11px] uppercase tracking-[1px] text-slate-400">
+                              <tr>
+                                <th className="px-3 py-2">UserID</th>
+                                <th className="px-3 py-2">CPU</th>
+                                <th className="px-3 py-2">GPU</th>
+                                <th className="px-3 py-2">VRAM</th>
+                                <th className="px-3 py-2">Total RAM</th>
+                                <th className="px-3 py-2">Power Rating</th>
+                                <th className="px-3 py-2">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(accessRequestsByJob[job.job_id] || []).map((request) => {
+                                const metadata = request.hardware_metadata || {}
+                                const cpuModel = request.cpu_model || metadata.cpu_model || metadata.cpu_name || 'Unknown'
+                                const gpuModel = request.gpu_model || metadata.gpu_model || metadata.gpu_name || 'Unknown'
+                                const gpuVramMb = request.gpu_vram_mb ?? metadata.gpu_vram_mb ?? null
+                                const ramMb = request.ram_mb ?? metadata.ram_mb ?? metadata.memory_total_mb ?? null
+                                const totalScore = request.total_score ?? metadata.total_score ?? metadata.machine_score ?? null
+
+                                return (
+                                <tr className="border-t border-white/10" key={request.request_id}>
+                                  <td className="px-3 py-2">#{request.requester_user_id}</td>
+                                  <td className="px-3 py-2">{cpuModel}</td>
+                                  <td className="px-3 py-2">{gpuModel}</td>
+                                  <td className="px-3 py-2">{gpuVramMb ? `${Math.round(gpuVramMb / 1024)} GB` : 'Unknown'}</td>
+                                  <td className="px-3 py-2">{ramMb ? `${Math.round(ramMb / 1024)} GB` : 'Unknown'}</td>
+                                  <td className="px-3 py-2 text-emerald-200">{totalScore ?? 'N/A'}</td>
+                                  <td className="px-3 py-2">
+                                    {request.status === 'requested' ? (
+                                      <button
+                                        className="rounded border border-emerald-200/70 bg-[#95f2bd] px-3 py-1 text-[10px] font-bold uppercase tracking-[1px] text-[#0b2d1e]"
+                                        onClick={() => handleAcceptAccess(job.job_id, request.requester_user_id)}
+                                        type="button"
+                                      >
+                                        Accept
+                                      </button>
+                                    ) : (
+                                      <span className="text-slate-400">{request.status}</span>
+                                    )}
+                                  </td>
+                                </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {isOwner && (acceptedHostsByJob[job.job_id] || []).length > 0 && (
+                    <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                      <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Accepted Hosts Rank</p>
+                      {(acceptedHostsByJob[job.job_id] || []).map((host) => (
+                        <p className="mt-2 text-[12px] text-emerald-200" key={`${job.job_id}-${host.requester_user_id}`}>
+                          #{host.rank} user #{host.requester_user_id} | score {host.total_score ?? 'N/A'} | CPU {host.cpu_model || 'Unknown'} | GPU {host.gpu_model || 'Unknown'}
+                        </p>
+                      ))}
+                    </div>
                   )}
 
                   <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
@@ -215,7 +346,8 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                     </div>
                   )}
                 </article>
-              ))}
+                )
+              })}
 
               {marketplaceJobs.length === 0 && (
                 <p className="text-[13px] text-slate-400">No open jobs currently available for hosting.</p>
