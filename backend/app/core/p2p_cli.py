@@ -260,6 +260,24 @@ def _docker_container_running(container_name: str) -> bool:
         return False
 
 
+def _detect_gvisor() -> bool:
+    """Return True if the gVisor 'runsc' runtime is registered with Docker."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            runtimes = json.loads(result.stdout.strip())
+            return "runsc" in runtimes
+    except Exception:
+        pass
+    return False
+
+
 # ── iroh helpers ──────────────────────────────────────────────────────────────
 
 class _DownloadCallback:
@@ -452,11 +470,47 @@ async def _host_execute_docker(
                 "Hint: check quoting and special characters."
             ) from exc
 
+    # Probe gVisor once — result captured by the closure below.
+    use_gvisor = _detect_gvisor()
+    if use_gvisor:
+        print("[RVIDIA] gVisor (runsc) detected; CPU containers will use kernel-level isolation.")
+
     def _build_run_args(use_gpu: bool) -> list[str]:
         cmd = ["docker", "run", "--rm"]
+
+        # ── Runtime selection ────────────────────────────────────────────────
+        # GPU passthrough requires the nvidia runtime and is incompatible with
+        # runsc, so gVisor is only applied on CPU-mode containers.
         if use_gpu:
             cmd += ["--gpus", "all"]
+        elif use_gvisor:
+            cmd += ["--runtime", "runsc"]
+
+        # ── Resource throttling (DoS / fork-bomb prevention) ─────────────────
+        cmd += [
+            "--memory=4g",
+            "--cpus=2.0",
+            "--pids-limit", "100",
+        ]
+
+        # ── Privilege stripping ───────────────────────────────────────────────
+        cmd += [
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+        ]
+
+        # ── Filesystem hardening ──────────────────────────────────────────────
+        # Standard networking is preserved so jobs can fetch external assets.
+        cmd += [
+            "--read-only",     # immutable root FS
+            "--tmpfs", "/tmp", # writable scratch space without host exposure
+        ]
+
+        # ── Strictly isolated output volume ───────────────────────────────────
+        # abs_outputs is already resolved to an absolute path above.
         cmd += ["-v", f"{abs_outputs}:/outputs"]
+
+        # Renter-supplied extra args appended last (after all hardening flags).
         cmd += extra_args
         cmd.append(image_tag)
         return cmd

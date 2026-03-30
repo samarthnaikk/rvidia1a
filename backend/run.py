@@ -77,4 +77,4 @@ app.include_router(p2p.router, prefix="/p2p", tags=["P2P Coordination"])
 
 @app.get("/")
 def root():
-    return {"message": "Hello from FastAPI 🚀"}
+    return {"message": "Hello from FastAPI"}
