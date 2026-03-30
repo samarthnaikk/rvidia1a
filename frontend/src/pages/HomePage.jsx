@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import Navbar from '../components/Navbar'
 import atmosphereGlow from '../assets/imagee.png'
 
-function HomePage({ onLoginClick, onStartComputingClick }) {
+function HomePage({ onLoginClick, onStartComputingClick, onDemoClick }) {
   const rotatingWords = ['Compute', 'GPUs', 'Training', 'Workload']
   const [wordIndex, setWordIndex] = useState(0)
 
@@ -68,7 +68,7 @@ function HomePage({ onLoginClick, onStartComputingClick }) {
             </span>
           </h1>
 
-      <p className="mx-auto mt-32 max-w-[760px] text-center font-['Manrope'] text-[20px] font-normal text-[#B9CBBB] leading-[28px] tracking-[0px] text-slate-300/90 align-middle">
+          <p className="mx-auto mt-32 max-w-[760px] text-center font-['Manrope'] text-[20px] font-normal text-[#B9CBBB] leading-[28px] tracking-[0px] text-slate-300/90 align-middle">
             Access high-performance GPUs and idle compute cycles at a fraction of centralized cost. Secure, scalable, and fully sovereign.
           </p>
 
@@ -82,9 +82,10 @@ function HomePage({ onLoginClick, onStartComputingClick }) {
             </button>
             <button
               className="h-[52px] min-w-[210px] border border-white/20 bg-white/5 px-7 text-[12px] font-bold uppercase tracking-[3px] text-slate-200 transition hover:bg-white/10"
+              onClick={onDemoClick}
               type="button"
             >
-              Contribute Resources
+              Demo
             </button>
           </div>
         </div>

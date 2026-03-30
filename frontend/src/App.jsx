@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { APP_CLASSES } from './constants/appData'
 import CreateAccountPage from './pages/CreateAccountPage'
 import DashboardPage from './pages/DashboardPage'
+import DemoArchitecturePage from './pages/DemoArchitecturePage'
 import HomePage from './pages/HomePage'
 import JobResultsPage from './pages/JobResultsPage'
 import JobSubmissionPage from './pages/JobSubmissionPage'
@@ -63,14 +64,17 @@ function App() {
 
   return (
     <main className={APP_CLASSES.main}>
-      <div className={APP_CLASSES.backgroundOverlay} />
+      {currentPage !== 'demo-architecture' && <div className={APP_CLASSES.backgroundOverlay} />}
 
       {currentPage === 'home' && (
         <HomePage
           onLoginClick={() => setCurrentPage('login')}
           onStartComputingClick={() => setCurrentPage('create-account')}
+          onDemoClick={() => setCurrentPage('demo-architecture')}
         />
       )}
+
+      {currentPage === 'demo-architecture' && <DemoArchitecturePage />}
 
       {currentPage === 'login' && (
         <LoginPage
