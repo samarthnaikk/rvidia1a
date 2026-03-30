@@ -6,9 +6,12 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
   const [openJobs, setOpenJobs] = useState([])
   const [hostError, setHostError] = useState('')
   const tokenForCmd = authToken || 'MISSING_TOKEN'
+  const latestOwnedJob =
+    openJobs.find((job) => String(job.user_id) === String(currentUser?.id)) || null
+  const renterJobId = latestOwnedJob?.id || '<CREATE_JOB_FIRST>'
   const renterRunCommand =
     `python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token ${tokenForCmd} ` +
-    '--job-id <JOB_ID> --host-node-id <HOST_NODE_ID> --file-path /absolute/path/to/input.file --command "python {input}"'
+    `--job-id ${renterJobId} --file-path /absolute/path/to/input.file --command "python {input}"`
 
   useEffect(() => {
     let active = true
