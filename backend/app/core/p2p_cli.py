@@ -347,8 +347,12 @@ async def run_host(args):
 
     command = command_template.replace("{input}", received_file.name)
     print(f"Executing command for task {args.job_id}: {command}")
-    proc, _log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
+    proc, log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
     return_code = await proc.wait()
+
+    # Drain the async stdout iterator so captured_lines includes print output.
+    async for _ in log_source:
+        pass
 
     output_lines = list(captured_lines)
     if not output_lines:
