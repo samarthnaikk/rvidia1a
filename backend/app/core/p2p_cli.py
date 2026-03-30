@@ -4,6 +4,7 @@ import inspect
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -437,6 +438,11 @@ async def _host_execute_docker(
         )
         output_files = [fallback]
 
+    print(f"[RVIDIA] Collected {len(output_files)} output file(s)")
+    for out_file in output_files:
+        size = out_file.stat().st_size
+        print(f"[RVIDIA]   {out_file.name} ({size} bytes)")
+
     # 6. Share each output file as an iroh ticket and push signal.
     artifact_tickets: list[dict[str, str]] = []
     for out_file in output_files:
@@ -445,24 +451,59 @@ async def _host_execute_docker(
 
     logs_ticket = await _share_file_ticket(node, logs_file)
     success = run_rc == 0
+    transfer_id = str(uuid.uuid4())
 
-    _push_signal(
-        api_base=args.api_base,
-        token=args.token,
-        job_id=args.job_id,
-        from_node_id=node_id,
-        to_node_id=receiver_node_id,
-        message={
-            "type": "result_ticket",
-            "success": success,
-            "artifact_tickets": artifact_tickets,
-            # Legacy single-artifact fields for backwards compat.
-            "artifact_ticket": artifact_tickets[0]["ticket"] if artifact_tickets else "",
-            "artifact_name": artifact_tickets[0]["name"] if artifact_tickets else "",
-            "logs_ticket": logs_ticket,
-            "error_message": None if success else f"Container exited with code {run_rc}",
-        },
-    )
+    result_message = {
+        "type": "result_ticket",
+        "transfer_id": transfer_id,
+        "success": success,
+        "artifact_tickets": artifact_tickets,
+        # Legacy single-artifact fields for backwards compat.
+        "artifact_ticket": artifact_tickets[0]["ticket"] if artifact_tickets else "",
+        "artifact_name": artifact_tickets[0]["name"] if artifact_tickets else "",
+        "logs_ticket": logs_ticket,
+        "error_message": None if success else f"Container exited with code {run_rc}",
+    }
+
+    print(f"[RVIDIA] Publishing result_ticket with {len(artifact_tickets)} artifact ticket(s) (transfer_id={transfer_id})")
+
+    def _send_result_ticket() -> None:
+        _push_signal(
+            api_base=args.api_base,
+            token=args.token,
+            job_id=args.job_id,
+            from_node_id=node_id,
+            to_node_id=receiver_node_id,
+            message=result_message,
+        )
+
+    _send_result_ticket()
+
+    # 7. Wait for result_ack from renter (retry result_ticket every 3s up to 60s).
+    ack_timeout = 60
+    retry_interval = 3
+    ack_start = time.time()
+    retry_count = 0
+    ack_received = False
+
+    while not ack_received and (time.time() - ack_start) < ack_timeout:
+        await asyncio.sleep(retry_interval)
+        for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
+            if signal.get("type") == "result_ack" and signal.get("transfer_id") == transfer_id:
+                ack_received = True
+                print(f"[RVIDIA] ACK received from renter (transfer_id={transfer_id})")
+                break
+        if not ack_received:
+            retry_count += 1
+            print(f"[RVIDIA] Retrying result_ticket (attempt {retry_count}, transfer_id={transfer_id})...")
+            _send_result_ticket()
+
+    if not ack_received:
+        print(
+            f"[RVIDIA] WARNING: artifact delivery unacknowledged after {ack_timeout}s "
+            f"(transfer_id={transfer_id}). Renter may not have received the artifacts.",
+            file=sys.stderr,
+        )
 
     _api_post(
         args.api_base,
@@ -648,11 +689,9 @@ async def run_receiver(args):
         if result is None:
             await asyncio.sleep(2)
 
+    transfer_id = str(result.get("transfer_id") or "")
     logs_ticket = str(result.get("logs_ticket") or "")
     success = bool(result.get("success"))
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Download all artifact files.
     artifact_tickets: list[dict] = result.get("artifact_tickets") or []
@@ -662,19 +701,75 @@ async def run_receiver(args):
             {"name": str(result.get("artifact_name") or "artifact.txt"), "ticket": str(result["artifact_ticket"])}
         ]
 
+    if not artifact_tickets:
+        raise RuntimeError(
+            f"result_ticket received but contains no artifact tickets "
+            f"(transfer_id={transfer_id or 'unknown'})"
+        )
+
+    artifact_names = [e.get("name", "artifact.bin") for e in artifact_tickets]
+    print(f"[RVIDIA] Received result_ticket: transfer_id={transfer_id}, {len(artifact_tickets)} artifact(s): {artifact_names}")
+
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[RVIDIA] Saving artifacts to: {output_dir}")
+
+    _DOWNLOAD_RETRIES = 3
+    _DOWNLOAD_RETRY_DELAY = 2
+
     saved_paths: list[Path] = []
     for entry in artifact_tickets:
         ticket_str = entry.get("ticket", "")
         name = entry.get("name", "artifact.bin")
-        if ticket_str:
-            path = await _download_ticket_to_path(node, ticket_str, output_dir / name)
-            saved_paths.append(path)
-            print(f"[RVIDIA] Artifact saved: {path}")
+        if not ticket_str:
+            print(f"[RVIDIA] WARNING: empty ticket for '{name}', skipping.", file=sys.stderr)
+            continue
+        last_err: Exception | None = None
+        for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+            try:
+                print(f"[RVIDIA] Downloading '{name}' (attempt {attempt}/{_DOWNLOAD_RETRIES})...")
+                path = await _download_ticket_to_path(node, ticket_str, output_dir / name)
+                saved_paths.append(path)
+                print(f"[RVIDIA] Artifact saved: {path}")
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                print(f"[RVIDIA] Download attempt {attempt} failed for '{name}': {exc}", file=sys.stderr)
+                if attempt < _DOWNLOAD_RETRIES:
+                    await asyncio.sleep(_DOWNLOAD_RETRY_DELAY)
+        if last_err is not None:
+            raise RuntimeError(f"Failed to download artifact '{name}' after {_DOWNLOAD_RETRIES} attempts: {last_err}") from last_err
 
     if logs_ticket:
-        logs_path = await _download_ticket_to_path(node, logs_ticket, output_dir / "execution.log")
-        for line in logs_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            print(f"Remote GPU > {line}")
+        for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+            try:
+                logs_path = await _download_ticket_to_path(node, logs_ticket, output_dir / "execution.log")
+                for line in logs_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    print(f"Remote GPU > {line}")
+                break
+            except Exception as exc:
+                print(f"[RVIDIA] Log download attempt {attempt} failed: {exc}", file=sys.stderr)
+                if attempt < _DOWNLOAD_RETRIES:
+                    await asyncio.sleep(_DOWNLOAD_RETRY_DELAY)
+
+    # Send ACK back to host so it stops retrying result_ticket.
+    if transfer_id and host_node_id:
+        print(f"[RVIDIA] Sending result_ack to host (transfer_id={transfer_id})...")
+        _push_signal(
+            api_base=args.api_base,
+            token=args.token,
+            job_id=args.job_id,
+            from_node_id=node_id,
+            to_node_id=host_node_id,
+            message={
+                "type": "result_ack",
+                "transfer_id": transfer_id,
+                "job_id": args.job_id,
+                "status": "received",
+            },
+        )
+        print(f"[RVIDIA] ACK dispatched (transfer_id={transfer_id})")
 
     _api_post(
         args.api_base,
