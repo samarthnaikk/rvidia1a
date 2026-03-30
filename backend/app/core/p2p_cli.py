@@ -461,14 +461,14 @@ async def _host_execute_docker(
 
     if prefer_gpu:
         # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
-        gpu_first = _build_run_cmd(use_gpu=True)
+        gpu_first = _build_run_args(use_gpu=True)
         run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
         async for line in run_logs:
             print(f"[docker run] {line}")
         run_rc = await run_proc.wait()
     else:
         print("[RVIDIA] No GPU detected; running container in CPU mode.")
-        cpu_cmd = _build_run_cmd(use_gpu=False)
+        cpu_cmd = _build_run_args(use_gpu=False)
         run_proc, run_logs, run_captured = await _run_command_with_logs(cpu_cmd, workspace_dir)
         async for line in run_logs:
             print(f"[docker run] {line}")
@@ -487,7 +487,7 @@ async def _host_execute_docker(
         gpu_unavailable = any(marker in combined for marker in gpu_error_markers)
         if gpu_unavailable:
             print("[RVIDIA] Docker GPU runtime unavailable; retrying container without GPU flags.")
-            cpu_fallback = _build_run_cmd(use_gpu=False)
+            cpu_fallback = _build_run_args(use_gpu=False)
             cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(cpu_fallback, workspace_dir)
             async for line in cpu_logs:
                 print(f"[docker run] {line}")
