@@ -117,14 +117,16 @@ class RvidiaNode:
     def __init__(self, workspace_manager: WorkspaceManager) -> None:
         self.workspace_manager = workspace_manager
         self.endpoint: Any | None = None
+        self._endpoint_owner: Any | None = None
         self.node_id: Any | None = None
         self.alpn = _ALPN
         self.chunk_size = _DEFAULT_CHUNK_SIZE
 
     async def initialize(self, secret_key: str | bytes | None = None) -> str:
         """Initialize iroh endpoint and return node identifier."""
-        endpoint = await _create_iroh_endpoint(secret_key=secret_key, alpn=self.alpn)
+        endpoint, endpoint_owner = await _create_iroh_endpoint(secret_key=secret_key, alpn=self.alpn)
         self.endpoint = endpoint
+        self._endpoint_owner = endpoint_owner
 
         node_id_value = None
         for attr in ("node_id", "node_id_str", "id"):
@@ -428,11 +430,51 @@ def _build_endpoint_kwargs(endpoint_cls: Any, secret_key: str | bytes | None, al
     return kwargs
 
 
-async def _create_iroh_endpoint(secret_key: str | bytes | None, alpn: bytes) -> Any:
+def _normalize_secret_key(secret_key: str | bytes | None) -> bytes | None:
+    if secret_key is None:
+        return None
+    if isinstance(secret_key, bytes):
+        return secret_key
+    if isinstance(secret_key, (bytearray, memoryview)):
+        return bytes(secret_key)
+    return secret_key.encode("utf-8")
+
+
+async def _create_iroh_endpoint(secret_key: str | bytes | None, alpn: bytes) -> tuple[Any, Any | None]:
     try:
         iroh = importlib.import_module("iroh")
     except ImportError as exc:
         raise RuntimeError("iroh Python bindings are required for RvidiaNode") from exc
+
+    normalized_secret = _normalize_secret_key(secret_key)
+
+    # Preferred path for newer iroh Python bindings exposing Iroh.memory(...).
+    iroh_client_cls = getattr(iroh, "Iroh", None)
+    if iroh_client_cls is not None:
+        client = None
+        memory_with_options = getattr(iroh_client_cls, "memory_with_options", None)
+        memory = getattr(iroh_client_cls, "memory", None)
+        if callable(memory_with_options):
+            node_options_cls = getattr(iroh, "NodeOptions", None)
+            if node_options_cls is not None:
+                options_kwargs: dict[str, Any] = {}
+                if normalized_secret is not None:
+                    options_kwargs["secret_key"] = normalized_secret
+                options = node_options_cls(**options_kwargs)
+                maybe_client = memory_with_options(options)
+                client = await maybe_client if inspect.isawaitable(maybe_client) else maybe_client
+        if client is None and callable(memory):
+            maybe_client = memory()
+            client = await maybe_client if inspect.isawaitable(maybe_client) else maybe_client
+
+        if client is not None:
+            client_node = getattr(client, "node", None)
+            node_obj = client_node() if callable(client_node) else None
+            if node_obj is not None:
+                endpoint_getter = getattr(node_obj, "endpoint", None)
+                endpoint = endpoint_getter() if callable(endpoint_getter) else endpoint_getter
+                if endpoint is not None:
+                    return endpoint, client
 
     endpoint_cls = getattr(iroh, "Endpoint", None)
     if endpoint_cls is None:
@@ -442,23 +484,26 @@ async def _create_iroh_endpoint(secret_key: str | bytes | None, alpn: bytes) -> 
     if callable(builder):
         configured_builder = builder()
         builder_alpns = getattr(configured_builder, "alpns", None)
-        builder_alpn = getattr(configured_builder, "alpn", None)
-        builder_secret_key = getattr(configured_builder, "secret_key", None)
-        builder_bind = getattr(configured_builder, "bind", None)
-
         if callable(builder_alpns):
             configured_builder = builder_alpns([alpn])
-        elif callable(builder_alpn):
-            configured_builder = builder_alpn(alpn)
-        if secret_key is not None and callable(builder_secret_key):
-            configured_builder = builder_secret_key(secret_key)
+        else:
+            builder_alpn = getattr(configured_builder, "alpn", None)
+            if callable(builder_alpn):
+                configured_builder = builder_alpn(alpn)
 
+        if normalized_secret is not None:
+            builder_secret_key = getattr(configured_builder, "secret_key", None)
+            if callable(builder_secret_key):
+                configured_builder = builder_secret_key(normalized_secret)
+
+        builder_bind = getattr(configured_builder, "bind", None)
         if callable(builder_bind):
             bind_result = builder_bind()
-            return await bind_result if inspect.isawaitable(bind_result) else bind_result
+            endpoint = await bind_result if inspect.isawaitable(bind_result) else bind_result
+            return endpoint, None
 
-    kwargs = _build_endpoint_kwargs(endpoint_cls=endpoint_cls, secret_key=secret_key, alpn=alpn)
+    kwargs = _build_endpoint_kwargs(endpoint_cls=endpoint_cls, secret_key=normalized_secret, alpn=alpn)
     endpoint = endpoint_cls(**kwargs)
     if inspect.isawaitable(endpoint):
         endpoint = await endpoint
-    return endpoint
+    return endpoint, None
