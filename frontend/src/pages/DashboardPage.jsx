@@ -72,7 +72,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
       <div className="mx-auto w-full max-w-[1200px]">
         <div className="mb-10 flex items-center justify-between">
           <div>
-            <p className="text-[12px] uppercase tracking-[3px] text-emerald-300/70">Kinetic Core</p>
+            <p className="text-[12px] uppercase tracking-[3px] text-emerald-300/70">RVIDIA</p>
             <h1 className="mt-2 text-[42px] font-bold leading-[1.1] text-slate-100">
               Unified <span className="text-emerald-300">Dashboard</span>
             </h1>

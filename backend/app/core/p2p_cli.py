@@ -295,8 +295,28 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
     ticket = iroh.BlobTicket(ticket_str)
     await blobs.download(ticket.hash(), ticket.as_download_options(), _DownloadCallback())
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    await blobs.write_to_path(ticket.hash(), str(output_path))
-    return output_path
+
+    # iroh write may fail if target already exists; remove stale targets first.
+    if output_path.exists():
+        output_path.unlink()
+
+    try:
+        await blobs.write_to_path(ticket.hash(), str(output_path))
+        return output_path
+    except Exception as primary_error:
+        fallback_path = output_path.with_name(
+            f"{output_path.stem}-{int(time.time())}{output_path.suffix}"
+        )
+        if fallback_path.exists():
+            fallback_path.unlink()
+        try:
+            await blobs.write_to_path(ticket.hash(), str(fallback_path))
+            return fallback_path
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Failed to write downloaded ticket to '{output_path}' or fallback '{fallback_path}': "
+                f"{primary_error} | {fallback_error}"
+            ) from fallback_error
 
 
 def _push_signal(

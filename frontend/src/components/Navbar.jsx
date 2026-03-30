@@ -3,7 +3,7 @@ import { NAV_LINKS, APP_CLASSES } from '../constants/appData'
 function Navbar({ onLoginClick }) {
   return (
     <nav className={APP_CLASSES.navbar}>
-      <div className="text-[20px] text-emerald-400">KINETIC_CORE</div>
+      <div className="text-[20px] text-emerald-400">RVIDIA</div>
 
       <div className="hidden items-center gap-8 text-[15px] font-medium tracking-[0.5px] text-slate-400 md:flex">
         {NAV_LINKS.map((link) => (
