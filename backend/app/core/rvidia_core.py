@@ -109,6 +109,8 @@ class TaskMetadata:
     command: str
     filename: str
     task_id: str
+    repo_url: str = ""
+    branch: str = "main"
 
 
 class RvidiaNode:
@@ -220,7 +222,15 @@ class RvidiaNode:
 
         raise ValueError("mode must be either 'send' or 'receive'")
 
-    async def send_handshake(self, stream: Any, command: str, filename: str, task_id: str) -> None:
+    async def send_handshake(
+        self,
+        stream: Any,
+        command: str,
+        filename: str,
+        task_id: str,
+        repo_url: str = "",
+        branch: str = "main",
+    ) -> None:
         """Renter sends task metadata for host-side execution."""
         await send_payload(
             stream,
@@ -229,6 +239,8 @@ class RvidiaNode:
                 "command": command,
                 "filename": filename,
                 "task_id": task_id,
+                "repo_url": repo_url,
+                "branch": branch,
             },
         )
 
@@ -237,13 +249,19 @@ class RvidiaNode:
         if payload.get("type") != "task_metadata":
             raise ValueError("expected task_metadata payload")
 
-        command = payload.get("command")
-        filename = payload.get("filename")
+        command = payload.get("command", "")
+        filename = payload.get("filename", "")
         task_id = payload.get("task_id")
-        if not isinstance(command, str) or not isinstance(filename, str) or not isinstance(task_id, str):
-            raise ValueError("invalid task_metadata payload")
+        if not isinstance(task_id, str):
+            raise ValueError("invalid task_metadata payload: missing task_id")
 
-        return TaskMetadata(command=command, filename=filename, task_id=task_id)
+        return TaskMetadata(
+            command=str(command),
+            filename=str(filename),
+            task_id=task_id,
+            repo_url=str(payload.get("repo_url") or ""),
+            branch=str(payload.get("branch") or "main"),
+        )
 
     async def stream_logs(self, stream: Any, log_source: AsyncIterator[str] | Iterator[str]) -> None:
         """Host-side telemetry: stream log lines into the P2P channel."""

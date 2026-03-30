@@ -8,6 +8,7 @@ from app.routes.auth import get_current_user
 from app.schemas.job import (
     JobCompletionRequest,
     JobUpdateStatusRequest,
+    RegisterHostRequest,
     RegisterNodeRequest,
     SignalAnswerRequest,
     SignalCandidateRequest,
@@ -41,15 +42,117 @@ def _queue_signal(job_id: str, signal: dict) -> None:
     _SIGNALS[job_id].append(signal)
 
 
+# ── Marketplace endpoints ─────────────────────────────────────────────────────
+
+@router.get("/hosts")
+def list_hosts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return jobs that have a registered host, including GPU metadata."""
+    jobs = (
+        db.query(Job)
+        .filter(Job.host_node_id.isnot(None))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "job_id": j.id,
+            "host_node_id": j.host_node_id,
+            "status": j.status,
+            "gpu_model": j.gpu_model,
+            "gpu_vram": j.gpu_vram,
+            "gpu_driver": j.gpu_driver,
+            "access_status": j.access_status,
+        }
+        for j in jobs
+    ]
+
+
+@router.get("/jobs")
+def list_marketplace_jobs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return pending jobs with repo metadata for host browsing."""
+    jobs = (
+        db.query(Job)
+        .filter(Job.status.in_(["queued", "awaiting_receiver"]))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "job_id": j.id,
+            "user_id": j.user_id,
+            "repo_url": j.repo_url,
+            "branch": j.branch,
+            "status": j.status,
+            "access_status": j.access_status,
+            "created_at": j.created_at.isoformat(),
+        }
+        for j in jobs
+    ]
+
+
+@router.post("/jobs/{job_id}/request-access")
+def request_access(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Renter signals intent to use a host's registered job slot."""
+    job = _get_job(job_id, db)
+    if job.access_status != "open":
+        raise HTTPException(status_code=409, detail=f"Job access is already '{job.access_status}'")
+    job.access_status = "requested"
+    job.access_requested_by = current_user.id
+    db.commit()
+    db.refresh(job)
+    return {"job_id": job.id, "access_status": job.access_status, "requested_by": current_user.id}
+
+
+@router.post("/jobs/{job_id}/accept-access")
+def accept_access(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Host owner accepts the renter's request; CLI connect string is now active."""
+    job = _get_job_for_user(job_id, current_user.id, db)
+    if job.access_status != "requested":
+        raise HTTPException(status_code=409, detail=f"No pending access request on job '{job_id}'")
+    job.access_status = "accepted"
+    job.status = "ready_for_transfer"
+    db.commit()
+    db.refresh(job)
+    return {
+        "job_id": job.id,
+        "access_status": job.access_status,
+        "status": job.status,
+        "host_node_id": job.host_node_id,
+        "receiver_node_id": job.receiver_node_id,
+    }
+
+
+# ── Node registration ─────────────────────────────────────────────────────────
+
 @router.post("/jobs/{job_id}/register-host")
 def register_host(
     job_id: str,
-    payload: RegisterNodeRequest,
+    payload: RegisterHostRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     job = _get_job(job_id, db)
     job.host_node_id = payload.node_id
+    if payload.gpu_model is not None:
+        job.gpu_model = payload.gpu_model
+    if payload.gpu_vram is not None:
+        job.gpu_vram = payload.gpu_vram
+    if payload.gpu_driver is not None:
+        job.gpu_driver = payload.gpu_driver
     if job.status == "queued":
         job.status = "awaiting_receiver"
     db.commit()
@@ -93,6 +196,8 @@ def get_job_peers(
         "status": job.status,
     }
 
+
+# ── Signaling ─────────────────────────────────────────────────────────────────
 
 @router.post("/jobs/{job_id}/offer")
 def push_offer(
