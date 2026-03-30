@@ -23,6 +23,10 @@ class Job(Base):
     # Coordination metadata only; no file/log payloads are stored on server.
     host_node_id: Mapped[str | None] = mapped_column(String, nullable=True)
     receiver_node_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    latest_host_node_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    latest_receiver_node_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    artifact_state: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
 
     # GPU metadata reported by host on registration
     gpu_model: Mapped[str | None] = mapped_column(String, nullable=True)

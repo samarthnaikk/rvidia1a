@@ -10,6 +10,7 @@ from app.models.p2p_signal import P2PSignal
 from app.models.user import User
 from app.routes.auth import get_current_user
 from app.schemas.job import (
+    ArtifactStateUpdateRequest,
     JobCompletionRequest,
     JobUpdateStatusRequest,
     RegisterHostRequest,
@@ -52,6 +53,11 @@ def _ensure_participant_access(job: Job, user: User) -> None:
     raise HTTPException(status_code=403, detail="Access not granted for this job")
 
 
+def _bump_session(job: Job) -> None:
+    current = int(job.session_version or 0)
+    job.session_version = current + 1
+
+
 def _marketplace_view(job: Job, current_user: User) -> dict:
     owner = _is_owner(job, current_user)
     requester = _is_requester(job, current_user)
@@ -66,6 +72,10 @@ def _marketplace_view(job: Job, current_user: User) -> dict:
         "gpu_model": job.gpu_model,
         "gpu_vram": job.gpu_vram,
         "gpu_driver": job.gpu_driver,
+        "session_version": job.session_version,
+        "artifact_state": job.artifact_state,
+        "latest_host_node_id": job.latest_host_node_id,
+        "latest_receiver_node_id": job.latest_receiver_node_id,
         "can_request": (not owner) and job.access_status == "open",
         "can_accept": owner and job.access_status == "requested",
         "is_owner": owner,
@@ -148,6 +158,7 @@ def request_access(
         raise HTTPException(status_code=409, detail=f"Job access is already '{job.access_status}'")
     job.access_status = "requested"
     job.access_requested_by = current_user.id
+    job.artifact_state = "PENDING"
     db.commit()
     db.refresh(job)
     return {"job_id": job.id, "access_status": job.access_status, "requested_by": current_user.id}
@@ -165,6 +176,7 @@ def accept_access(
         raise HTTPException(status_code=409, detail=f"No pending access request on job '{job_id}'")
     job.access_status = "accepted"
     job.status = "ready_for_transfer"
+    job.artifact_state = "PENDING"
     db.commit()
     db.refresh(job)
     return {
@@ -189,6 +201,8 @@ def register_host(
     if not _is_owner(job, current_user) and not _is_requester(job, current_user):
         raise HTTPException(status_code=403, detail="Only job participants can register as host")
     job.host_node_id = payload.node_id
+    job.latest_host_node_id = payload.node_id
+    _bump_session(job)
     if payload.gpu_model is not None:
         job.gpu_model = payload.gpu_model
     if payload.gpu_vram is not None:
@@ -199,7 +213,13 @@ def register_host(
         job.status = "awaiting_receiver"
     db.commit()
     db.refresh(job)
-    return {"job_id": job.id, "host_node_id": job.host_node_id, "status": job.status}
+    return {
+        "job_id": job.id,
+        "host_node_id": job.host_node_id,
+        "latest_host_node_id": job.latest_host_node_id,
+        "session_version": job.session_version,
+        "status": job.status,
+    }
 
 
 @router.post("/jobs/{job_id}/register-receiver")
@@ -209,10 +229,13 @@ def register_receiver(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    job = _get_job_for_user(job_id, current_user.id, db)
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
     if job.access_status != "accepted":
         raise HTTPException(status_code=409, detail="Access must be accepted before receiver can register")
     job.receiver_node_id = payload.node_id
+    job.latest_receiver_node_id = payload.node_id
+    _bump_session(job)
     if job.host_node_id:
         job.status = "ready_for_transfer"
     db.commit()
@@ -220,7 +243,11 @@ def register_receiver(
     return {
         "job_id": job.id,
         "receiver_node_id": job.receiver_node_id,
+        "latest_receiver_node_id": job.latest_receiver_node_id,
         "host_node_id": job.host_node_id,
+        "latest_host_node_id": job.latest_host_node_id,
+        "session_version": job.session_version,
+        "artifact_state": job.artifact_state,
         "status": job.status,
     }
 
@@ -237,8 +264,35 @@ def get_job_peers(
         "job_id": job.id,
         "host_node_id": job.host_node_id,
         "receiver_node_id": job.receiver_node_id,
+        "latest_host_node_id": job.latest_host_node_id or job.host_node_id,
+        "latest_receiver_node_id": job.latest_receiver_node_id or job.receiver_node_id,
+        "session_version": job.session_version,
+        "artifact_state": job.artifact_state,
         "ready": bool(job.host_node_id and job.receiver_node_id),
         "status": job.status,
+    }
+
+
+@router.post("/jobs/{job_id}/artifact-state")
+def update_artifact_state(
+    job_id: str,
+    payload: ArtifactStateUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = _get_job(job_id, db)
+    _ensure_participant_access(job, current_user)
+    allowed = {"PENDING", "READY_FOR_TRANSFER", "DELIVERED"}
+    next_state = (payload.artifact_state or "").strip().upper()
+    if next_state not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid artifact_state '{payload.artifact_state}'")
+    job.artifact_state = next_state
+    db.commit()
+    db.refresh(job)
+    return {
+        "job_id": job.id,
+        "artifact_state": job.artifact_state,
+        "session_version": job.session_version,
     }
 
 
@@ -382,6 +436,8 @@ def p2p_complete_job(
     job = _get_job(job_id, db)
     _ensure_participant_access(job, current_user)
     job.status = "completed" if payload.success else "failed"
+    if payload.success:
+        job.artifact_state = "DELIVERED"
     job.artifact_name = payload.artifact_name
     job.artifact_path = payload.artifact_path
     job.error_message = payload.error_message
