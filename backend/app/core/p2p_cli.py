@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
 import platform
 import shlex
 import shutil
@@ -11,7 +12,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib import error, request
 from urllib.parse import urlsplit, urlunsplit
 
@@ -238,6 +239,111 @@ def _detect_gpu() -> dict[str, str | None]:
         pass
 
     return {"gpu_model": None, "gpu_vram": None, "gpu_driver": None}
+
+
+def _safe_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_gpu_vram_mb(gpu_vram: str | None) -> int | None:
+    if not gpu_vram:
+        return None
+    digits = "".join(ch for ch in str(gpu_vram) if ch.isdigit())
+    return _safe_int(digits)
+
+
+def _memory_total_mb() -> int | None:
+    try:
+        if platform.system() == "Darwin":
+            import subprocess
+
+            result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                bytes_value = _safe_int(result.stdout.strip())
+                if bytes_value:
+                    return int(bytes_value / (1024 * 1024))
+        if hasattr(os, "sysconf") and "SC_PAGE_SIZE" in os.sysconf_names and "SC_PHYS_PAGES" in os.sysconf_names:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            pages = os.sysconf("SC_PHYS_PAGES")
+            if isinstance(page_size, int) and isinstance(pages, int) and page_size > 0 and pages > 0:
+                return int((page_size * pages) / (1024 * 1024))
+    except Exception:
+        return None
+    return None
+
+
+def _clamp_score(value: float) -> float:
+    if value < 0:
+        return 0.0
+    if value > 100:
+        return 100.0
+    return round(value, 2)
+
+
+def _keyword_score(name: str | None, tiers: Sequence[tuple[str, float]]) -> float:
+    if not name:
+        return 0.0
+    lowered = name.lower()
+    for key, score in tiers:
+        if key in lowered:
+            return score
+    return 0.0
+
+
+def _build_machine_profile(gpu_info: dict[str, str | None]) -> dict[str, Any]:
+    cpu_model = platform.processor() or platform.machine() or platform.platform()
+    logical = _safe_int(os.cpu_count())
+    physical = logical
+    if logical and logical > 1:
+        physical = max(1, int(logical / 2))
+
+    memory_total_mb = _memory_total_mb()
+    gpu_vram_mb = _parse_gpu_vram_mb(gpu_info.get("gpu_vram"))
+
+    cpu_tiers = [
+        ("threadripper", 35),
+        ("xeon", 30),
+        ("epyc", 35),
+        ("ryzen 9", 28),
+        ("ryzen 7", 24),
+        ("core i9", 26),
+        ("core i7", 22),
+        ("apple", 22),
+    ]
+    gpu_tiers = [
+        ("rtx 4090", 70),
+        ("rtx 3090", 62),
+        ("rtx", 55),
+        ("a100", 75),
+        ("h100", 80),
+        ("radeon", 42),
+        ("apple", 34),
+        ("intel", 22),
+    ]
+
+    cpu_score = _clamp_score((physical or 0) * 3 + (logical or 0) * 1.5 + _keyword_score(cpu_model, cpu_tiers))
+    gpu_score = _clamp_score((gpu_vram_mb or 0) / 256 + _keyword_score(gpu_info.get("gpu_model"), gpu_tiers))
+    memory_score = _clamp_score((memory_total_mb or 0) / 512)
+    machine_score = _clamp_score((0.35 * cpu_score) + (0.5 * gpu_score) + (0.15 * memory_score))
+
+    return {
+        "cpu_model": cpu_model,
+        "cpu_physical_cores": physical,
+        "cpu_logical_cores": logical,
+        "cpu_max_clock_mhz": None,
+        "memory_total_mb": memory_total_mb,
+        "gpu_vram_mb": gpu_vram_mb,
+        "cpu_score": cpu_score,
+        "gpu_score": gpu_score,
+        "memory_score": memory_score,
+        "machine_score": machine_score,
+        "ranking_version": "v1",
+    }
 
 
 def _is_gpu_runtime_unavailable(stderr_or_logs: str) -> bool:
@@ -626,7 +732,8 @@ async def _delivery_polling_loop(
 
 
 def _collect_host_artifacts_from_state(state: dict[str, Any]) -> list[Path]:
-    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), list) else []
+    raw_artifacts = state.get("artifacts")
+    artifacts: list[Any] = raw_artifacts if isinstance(raw_artifacts, list) else []
     paths: list[Path] = []
     for artifact in artifacts:
         if not isinstance(artifact, dict):
@@ -873,6 +980,7 @@ async def run_host(args):
     node_id = await node.initialize(secret_key=args.secret_key)
 
     gpu_info = _detect_gpu()
+    machine_profile = _build_machine_profile(gpu_info)
     print(f"[RVIDIA] GPU: {gpu_info.get('gpu_model') or 'not detected'}")
 
     legacy_access_mode = False
@@ -906,7 +1014,7 @@ async def run_host(args):
             args.api_base,
             f"/p2p/jobs/{args.job_id}/register-host",
             args.token,
-            {"node_id": node_id, **gpu_info},
+            {"node_id": node_id, **gpu_info, **machine_profile},
         )
     except RuntimeError as exc:
         if "Job not found" in str(exc):

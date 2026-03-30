@@ -16,6 +16,13 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
     `python -m app.core.p2p_cli receiver --api-base ${defaultApiBase} --token ${tokenForCmd} ` +
     `--job-id ${renterJobId} --repo-url "${renterRepoUrl}" --branch "${renterBranch}"`
 
+  const formatGb = (mb) => {
+    if (!mb || Number.isNaN(Number(mb))) {
+      return 'Unknown'
+    }
+    return `${Math.max(1, Math.round(Number(mb) / 1024))} GB`
+  }
+
   const refreshMarketplace = async (active) => {
     try {
       const jobs = await listMarketplaceJobs(authToken)
@@ -178,6 +185,18 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                   <p className="text-[12px] text-slate-300">Branch: {job.branch || 'main'}</p>
                   <p className="text-[12px] text-emerald-200">Status: {job.status}</p>
                   <p className="text-[12px] text-slate-300">Access: {job.access_status}</p>
+
+                  <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                    <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Machine Specs</p>
+                    <p className="mt-2 text-[12px] text-slate-300">CPU: {job.cpu_model || 'Unknown'}</p>
+                    <p className="text-[12px] text-slate-300">
+                      Cores: {job.cpu_physical_cores || 'N/A'}P / {job.cpu_logical_cores || 'N/A'}L
+                    </p>
+                    <p className="text-[12px] text-slate-300">GPU: {job.gpu_model || 'Unknown'}</p>
+                    <p className="text-[12px] text-slate-300">VRAM: {job.gpu_vram || formatGb(job.gpu_vram_mb)}</p>
+                    <p className="text-[12px] text-slate-300">System RAM: {formatGb(job.memory_total_mb)}</p>
+                    <p className="text-[12px] text-emerald-200">Machine Score: {job.machine_score ?? 'N/A'}</p>
+                  </div>
 
                   {job.can_request && (
                     <button

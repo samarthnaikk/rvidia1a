@@ -72,6 +72,17 @@ def _marketplace_view(job: Job, current_user: User) -> dict:
         "gpu_model": job.gpu_model,
         "gpu_vram": job.gpu_vram,
         "gpu_driver": job.gpu_driver,
+        "gpu_vram_mb": job.gpu_vram_mb,
+        "cpu_model": job.cpu_model,
+        "cpu_physical_cores": job.cpu_physical_cores,
+        "cpu_logical_cores": job.cpu_logical_cores,
+        "cpu_max_clock_mhz": job.cpu_max_clock_mhz,
+        "memory_total_mb": job.memory_total_mb,
+        "cpu_score": job.cpu_score,
+        "gpu_score": job.gpu_score,
+        "memory_score": job.memory_score,
+        "machine_score": job.machine_score,
+        "ranking_version": job.ranking_version,
         "session_version": job.session_version,
         "artifact_state": job.artifact_state,
         "latest_host_node_id": job.latest_host_node_id,
@@ -105,6 +116,17 @@ def list_hosts(
             "gpu_model": j.gpu_model,
             "gpu_vram": j.gpu_vram,
             "gpu_driver": j.gpu_driver,
+            "gpu_vram_mb": j.gpu_vram_mb,
+            "cpu_model": j.cpu_model,
+            "cpu_physical_cores": j.cpu_physical_cores,
+            "cpu_logical_cores": j.cpu_logical_cores,
+            "cpu_max_clock_mhz": j.cpu_max_clock_mhz,
+            "memory_total_mb": j.memory_total_mb,
+            "cpu_score": j.cpu_score,
+            "gpu_score": j.gpu_score,
+            "memory_score": j.memory_score,
+            "machine_score": j.machine_score,
+            "ranking_version": j.ranking_version,
             "access_status": j.access_status,
         }
         for j in jobs
@@ -209,6 +231,28 @@ def register_host(
         job.gpu_vram = payload.gpu_vram
     if payload.gpu_driver is not None:
         job.gpu_driver = payload.gpu_driver
+    if payload.gpu_vram_mb is not None:
+        job.gpu_vram_mb = payload.gpu_vram_mb
+    if payload.cpu_model is not None:
+        job.cpu_model = payload.cpu_model
+    if payload.cpu_physical_cores is not None:
+        job.cpu_physical_cores = payload.cpu_physical_cores
+    if payload.cpu_logical_cores is not None:
+        job.cpu_logical_cores = payload.cpu_logical_cores
+    if payload.cpu_max_clock_mhz is not None:
+        job.cpu_max_clock_mhz = payload.cpu_max_clock_mhz
+    if payload.memory_total_mb is not None:
+        job.memory_total_mb = payload.memory_total_mb
+    if payload.cpu_score is not None:
+        job.cpu_score = payload.cpu_score
+    if payload.gpu_score is not None:
+        job.gpu_score = payload.gpu_score
+    if payload.memory_score is not None:
+        job.memory_score = payload.memory_score
+    if payload.machine_score is not None:
+        job.machine_score = payload.machine_score
+    if payload.ranking_version is not None:
+        job.ranking_version = payload.ranking_version
     if job.status == "queued":
         job.status = "awaiting_receiver"
     db.commit()
