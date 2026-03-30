@@ -72,20 +72,119 @@ async def _call_any(obj: Any, names: list[str], *args: Any) -> Any:
             except TypeError:
                 continue
 
-    raise RuntimeError(f"No callable method found from: {', '.join(names)}")
+    available = [name for name in dir(obj) if not name.startswith("_") and callable(getattr(obj, name, None))]
+    raise RuntimeError(
+        f"No callable method found from: {', '.join(names)}. "
+        f"Available callables on {type(obj).__name__}: {', '.join(sorted(available))}"
+    )
+
+
+def _endpoint_variants(endpoint: Any) -> list[Any]:
+    variants = [endpoint]
+    for attr in ("endpoint", "node"):
+        candidate = getattr(endpoint, attr, None)
+        if candidate is None:
+            continue
+        if callable(candidate):
+            try:
+                candidate = candidate()
+            except TypeError:
+                continue
+        if candidate is not None:
+            variants.append(candidate)
+    return variants
+
+
+async def _candidate_to_stream(candidate: Any, role: str) -> Any:
+    if candidate is None:
+        raise RuntimeError("P2P stream candidate is None")
+
+    if any(hasattr(candidate, attr) for attr in ("read", "read_exact", "readexactly")) and any(
+        hasattr(candidate, attr) for attr in ("write", "write_all", "send")
+    ):
+        return candidate
+
+    method_groups: list[list[str]]
+    if role == "host":
+        method_groups = [
+            ["accept_bi", "accept_stream", "accept_bidirectional", "accept"],
+            ["open_bi", "open_stream", "open_bidirectional"],
+        ]
+    else:
+        method_groups = [
+            ["open_bi", "open_stream", "open_bidirectional", "connect_bi"],
+            ["accept_bi", "accept_stream", "accept_bidirectional", "accept"],
+        ]
+
+    for names in method_groups:
+        for try_args in ((),):
+            try:
+                maybe_stream = await _call_any(candidate, names, *try_args)
+            except RuntimeError:
+                continue
+            if maybe_stream is not None:
+                return maybe_stream
+
+    for attr in ("stream", "bi_stream", "channel"):
+        nested = getattr(candidate, attr, None)
+        if nested is not None:
+            if callable(nested):
+                nested = nested()
+                if inspect.isawaitable(nested):
+                    nested = await nested
+            if nested is not None:
+                return nested
+
+    raise RuntimeError(f"Unable to extract usable stream from {type(candidate).__name__}")
 
 
 async def _accept_stream(endpoint: Any, alpn: bytes) -> Any:
-    return await _call_any(endpoint, ["accept", "accept_bi", "accept_stream", "accept_bidirectional"], alpn)
+    for variant in _endpoint_variants(endpoint):
+        try:
+            candidate = await _call_any(
+                variant,
+                [
+                    "accept",
+                    "accept_bi",
+                    "accept_stream",
+                    "accept_bidirectional",
+                    "accept_connection",
+                    "accept_conn",
+                    "incoming",
+                    "listen",
+                ],
+                alpn,
+            )
+        except RuntimeError:
+            continue
+
+        if hasattr(candidate, "__anext__"):
+            candidate = await candidate.__anext__()
+        elif hasattr(candidate, "__aiter__"):
+            async for item in candidate:
+                candidate = item
+                break
+
+        return await _candidate_to_stream(candidate, role="host")
+
+    raise RuntimeError("Unable to accept iroh stream from endpoint; no compatible accept/listen API found")
 
 
 async def _connect_stream(endpoint: Any, node_id: str, alpn: bytes) -> Any:
-    return await _call_any(
-        endpoint,
-        ["connect", "connect_bi", "open_stream", "open_bidirectional"],
-        node_id,
-        alpn,
-    )
+    for variant in _endpoint_variants(endpoint):
+        try:
+            candidate = await _call_any(
+                variant,
+                ["connect", "connect_bi", "open_stream", "open_bidirectional", "dial"],
+                node_id,
+                alpn,
+            )
+        except RuntimeError:
+            continue
+
+        return await _candidate_to_stream(candidate, role="receiver")
+
+    raise RuntimeError("Unable to connect iroh stream; no compatible connect API found")
 
 
 async def _run_command_with_logs(command: str, cwd: Path):
