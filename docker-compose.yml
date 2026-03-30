@@ -4,13 +4,18 @@ services:
     restart: always
     depends_on:
       - postgres
+    profiles: ["dev"]
     ports:
       - "8000:8000"
-    env_file:
-      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      SECRET_KEY: rvidia-dev-secret
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
 
   frontend:
     build: ./frontend
+    profiles: ["dev"]
     ports:
       - "3000:3000"
 
@@ -25,6 +30,7 @@ services:
 
   postgres:
     build: ./postgres
+    profiles: ["dev"]
     ports:
       - "5432:5432"
     environment:
