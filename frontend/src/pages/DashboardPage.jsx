@@ -111,7 +111,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
               <div className="rounded border border-white/10 bg-[#060b14] p-3">
                 <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Renter Run Command (After Job Creation)</p>
                 <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                  python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token {authToken || 'MISSING_TOKEN'} --job-id &lt;JOB_ID&gt; --host-node-id &lt;HOST_NODE_ID&gt; --file-path /absolute/path/to/input.file --command "python {{input}}"
+                  python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token {authToken || 'MISSING_TOKEN'} --job-id &lt;JOB_ID&gt; --host-node-id &lt;HOST_NODE_ID&gt; --file-path /absolute/path/to/input.file --command "python {'{input}'}"
                 </p>
               </div>
             </div>
