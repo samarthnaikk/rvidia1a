@@ -21,7 +21,12 @@ class WorkspaceManager:
     """Manage isolated task workspaces with reconnect-aware lifecycle controls."""
 
     def __init__(self, base_dir: str | Path, reconnect_window_seconds: int = _DEFAULT_RECONNECT_WINDOW_SECONDS) -> None:
-        self.base_dir = Path(base_dir)
+        requested_base_dir = Path(base_dir)
+        if requested_base_dir.exists() and not requested_base_dir.is_dir():
+            # Recover from accidental file collisions (common on shared/dev machines).
+            requested_base_dir = Path(f"{requested_base_dir}.dir")
+
+        self.base_dir = requested_base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.reconnect_window_seconds = reconnect_window_seconds
         self._sessions: dict[str, Path] = {}
