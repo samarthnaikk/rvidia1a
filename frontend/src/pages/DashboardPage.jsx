@@ -1,8 +1,36 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { listOpenJobs } from '../lib/api'
 
-function DashboardPage({ onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
+function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const [selectedFile, setSelectedFile] = useState(null)
-  const [userQuery, setUserQuery] = useState('')
+  const [openJobs, setOpenJobs] = useState([])
+  const [hostError, setHostError] = useState('')
+
+  useEffect(() => {
+    let active = true
+
+    const loadOpenJobs = async () => {
+      try {
+        const jobs = await listOpenJobs(authToken)
+        if (active) {
+          setOpenJobs(jobs)
+          setHostError('')
+        }
+      } catch (error) {
+        if (active) {
+          setHostError(error.message)
+        }
+      }
+    }
+
+    loadOpenJobs()
+    const intervalId = setInterval(loadOpenJobs, 5000)
+
+    return () => {
+      active = false
+      clearInterval(intervalId)
+    }
+  }, [authToken])
 
   return (
     <section className="relative min-h-screen w-full bg-[#040811] px-6 pb-10 pt-8 text-slate-100 md:px-10 lg:px-14">
@@ -53,39 +81,56 @@ function DashboardPage({ onBackHome, onGoSubmit, onGoResults, onLogout, currentU
                 type="file"
               />
             </label>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <button
+                className="h-[48px] w-full rounded-[6px] border border-emerald-200/70 bg-[#95f2bd] text-[13px] font-bold uppercase tracking-[3px] text-[#0b2d1e]"
+                onClick={onGoSubmit}
+                type="button"
+              >
+                Submit GPU Job
+              </button>
+
+              <button
+                className="h-[48px] w-full rounded-[6px] border border-white/20 bg-transparent text-[12px] font-bold uppercase tracking-[2px] text-slate-300"
+                onClick={onGoResults}
+                type="button"
+              >
+                View Job Status / Results
+              </button>
+            </div>
           </div>
 
           <div className="rounded-[12px] border border-white/15 bg-[#0b1322c9] p-6">
             <p className="text-[10px] uppercase tracking-[3px] text-emerald-300/75">Operational Mode</p>
             <h2 className="mt-3 text-[34px] font-bold uppercase tracking-[1px] text-slate-100">Host Compute</h2>
-            <p className="mt-2 text-[15px] text-slate-400">Search for a user to host or assign compute access.</p>
+            <p className="mt-2 text-[15px] text-slate-400">Open jobs are visible below. Accept any job using terminal commands only.</p>
 
-            <div className="mt-7">
-              <label className="mb-2 block text-[10px] uppercase tracking-[3px] text-slate-500">Search User</label>
-              <input
-                className="font-jetbrains h-[52px] w-full rounded-[8px] border border-white/15 bg-[#0a101d] px-4 text-[15px] text-slate-200 outline-none placeholder:text-slate-500 focus:border-emerald-300/60"
-                onChange={(event) => setUserQuery(event.target.value)}
-                placeholder="Enter username or wallet id"
-                type="text"
-                value={userQuery}
-              />
+            {hostError && <p className="mt-4 text-[12px] text-red-300">{hostError}</p>}
+
+            <div className="mt-6 space-y-4">
+              {openJobs.map((job) => (
+                <article className="rounded border border-white/15 bg-[#08101d] p-4" key={job.id}>
+                  <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Open Job</p>
+                  <p className="font-jetbrains mt-1 break-all text-[12px] text-slate-200">{job.id}</p>
+                  <p className="mt-2 text-[12px] text-slate-300">Owner: user #{job.user_id}</p>
+                  <p className="text-[12px] text-slate-300">File: {job.filename}</p>
+                  <p className="text-[12px] text-slate-300">Command: {job.command}</p>
+                  <p className="text-[12px] text-emerald-200">Status: {job.status}</p>
+
+                  <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
+                    <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Accept Command</p>
+                    <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
+                      python -m app.core.p2p_cli host --api-base http://localhost:8000 --token &lt;JWT_TOKEN&gt; --job-id {job.id}
+                    </p>
+                  </div>
+                </article>
+              ))}
+
+              {openJobs.length === 0 && (
+                <p className="text-[13px] text-slate-400">No open jobs currently available for hosting.</p>
+              )}
             </div>
-
-            <button
-              className="mt-4 h-[48px] w-full rounded-[6px] border border-emerald-200/70 bg-[#95f2bd] text-[13px] font-bold uppercase tracking-[3px] text-[#0b2d1e]"
-              onClick={onGoSubmit}
-              type="button"
-            >
-              Submit GPU Job
-            </button>
-
-            <button
-              className="mt-3 h-[46px] w-full rounded-[6px] border border-white/20 bg-transparent text-[12px] font-bold uppercase tracking-[2px] text-slate-300"
-              onClick={onGoResults}
-              type="button"
-            >
-              View Job Status / Results
-            </button>
           </div>
         </div>
       </div>

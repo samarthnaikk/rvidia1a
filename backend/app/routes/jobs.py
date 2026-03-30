@@ -47,6 +47,19 @@ def list_jobs(
     )
 
 
+@router.get("/open", response_model=list[JobResponse])
+def list_open_jobs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return (
+        db.query(Job)
+        .filter(Job.status.in_(["queued", "awaiting_receiver", "ready_for_transfer", "transferring"]))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+
+
 @router.get("/{job_id}", response_model=JobResponse)
 def get_job(
     job_id: str,

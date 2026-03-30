@@ -26,6 +26,13 @@ def _get_job_for_user(job_id: str, user_id: int, db: Session) -> Job:
     return job
 
 
+def _get_job(job_id: str, db: Session) -> Job:
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
 def _queue_signal(job_id: str, signal: dict) -> None:
     if job_id not in _SIGNALS:
         _SIGNALS[job_id] = []
@@ -39,7 +46,7 @@ def register_host(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    job = _get_job_for_user(job_id, current_user.id, db)
+    job = _get_job(job_id, db)
     job.host_node_id = payload.node_id
     if job.status == "queued":
         job.status = "awaiting_receiver"

@@ -88,6 +88,7 @@ function App() {
 
       {currentPage === 'dashboard' && (
         <DashboardPage
+          authToken={authToken}
           currentUser={currentUser}
           onBackHome={() => setCurrentPage('home')}
           onGoResults={() => setCurrentPage('job-results')}

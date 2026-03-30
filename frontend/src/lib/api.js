@@ -58,6 +58,13 @@ export async function listJobs(token) {
   })
 }
 
+export async function listOpenJobs(token) {
+  return request('/jobs/open', {
+    method: 'GET',
+    headers: buildHeaders(token),
+  })
+}
+
 export async function getJob(token, jobId) {
   return request(`/jobs/${jobId}`, {
     method: 'GET',
