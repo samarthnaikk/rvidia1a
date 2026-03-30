@@ -19,6 +19,7 @@ from app.core.rvidia_core import RvidiaNode, WorkspaceManager
 
 
 DEFAULT_API_BASE = "http://157.180.74.2"
+DEFAULT_WORKSPACE = "./.p2p-workspaces"
 
 _RECONNECT_INTERVAL = 5  # seconds between reconnect attempts
 
@@ -209,6 +210,22 @@ def _is_wsl() -> bool:
         return "microsoft" in proc_version or "wsl" in proc_version
     except OSError:
         return False
+
+
+def _resolve_workspace_root(requested_workspace: str) -> str:
+    """Resolve workspace path robustly across Linux/macOS/WSL environments."""
+    candidate = Path(requested_workspace)
+
+    # WSL paths under /mnt/* can cause file-system quirks for high-churn temp data.
+    # Move default workspace to a Linux-native tmp dir for better reliability.
+    resolved = candidate.resolve() if not candidate.is_absolute() else candidate
+    if requested_workspace == DEFAULT_WORKSPACE and _is_wsl() and str(resolved).startswith("/mnt/"):
+        candidate = Path(tempfile.gettempdir()) / "rvidia-p2p-workspaces"
+
+    if candidate.exists() and not candidate.is_dir():
+        candidate = Path(f"{candidate}.dir")
+
+    return str(candidate)
 
 
 # ── Docker helpers ────────────────────────────────────────────────────────────
@@ -660,6 +677,11 @@ async def _host_execute_docker(
 
 
 async def run_host(args):
+    resolved_workspace = _resolve_workspace_root(args.workspace)
+    if resolved_workspace != args.workspace:
+        print(f"[RVIDIA] Workspace path adjusted to: {resolved_workspace}")
+    args.workspace = resolved_workspace
+
     workspace = WorkspaceManager(args.workspace)
     node = RvidiaNode(workspace)
     node_id = await node.initialize(secret_key=args.secret_key)
@@ -767,6 +789,11 @@ async def run_host(args):
 # ── Receiver logic ────────────────────────────────────────────────────────────
 
 async def run_receiver(args):
+    resolved_workspace = _resolve_workspace_root(args.workspace)
+    if resolved_workspace != args.workspace:
+        print(f"[RVIDIA] Workspace path adjusted to: {resolved_workspace}")
+    args.workspace = resolved_workspace
+
     workspace = WorkspaceManager(args.workspace)
     node = RvidiaNode(workspace)
     node_id = await node.initialize(secret_key=args.secret_key)
@@ -949,7 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--api-base", default=DEFAULT_API_BASE, help="Backend API base URL")
     common.add_argument("--token", required=True, help="Auth bearer token")
     common.add_argument("--job-id", required=True, help="Job ID from backend")
-    common.add_argument("--workspace", default="./.p2p-workspaces", help="Local workspace root")
+    common.add_argument("--workspace", default=DEFAULT_WORKSPACE, help="Local workspace root")
     common.add_argument("--secret-key", default=None, help="Optional iroh secret key")
 
     host = subparsers.add_parser("host", parents=[common], help="Start host and execute incoming Docker job")
