@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { listOpenJobs } from '../lib/api'
+import { listJobs, listOpenJobs } from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const [selectedFile, setSelectedFile] = useState(null)
   const [openJobs, setOpenJobs] = useState([])
+  const [myJobs, setMyJobs] = useState([])
   const [hostError, setHostError] = useState('')
+  const [rentError, setRentError] = useState('')
   const tokenForCmd = authToken || 'MISSING_TOKEN'
-  const latestOwnedJob =
-    openJobs.find((job) => String(job.user_id) === String(currentUser?.id)) || null
+  const latestOwnedJob = myJobs[0] || null
   const renterJobId = latestOwnedJob?.id || '<CREATE_JOB_FIRST>'
   const renterRunCommand =
     `python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token ${tokenForCmd} ` +
@@ -32,6 +33,32 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
 
     loadOpenJobs()
     const intervalId = setInterval(loadOpenJobs, 5000)
+
+    return () => {
+      active = false
+      clearInterval(intervalId)
+    }
+  }, [authToken])
+
+  useEffect(() => {
+    let active = true
+
+    const loadMyJobs = async () => {
+      try {
+        const jobs = await listJobs(authToken)
+        if (active) {
+          setMyJobs(jobs)
+          setRentError('')
+        }
+      } catch (error) {
+        if (active) {
+          setRentError(error.message)
+        }
+      }
+    }
+
+    loadMyJobs()
+    const intervalId = setInterval(loadMyJobs, 5000)
 
     return () => {
       active = false
@@ -108,6 +135,8 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
             </div>
 
             <div className="mt-5 space-y-3">
+              {rentError && <p className="text-[12px] text-red-300">{rentError}</p>}
+
               <div className="rounded border border-white/10 bg-[#060b14] p-3">
                 <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Renter Setup Command</p>
                 <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
