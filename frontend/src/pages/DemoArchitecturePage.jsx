@@ -121,7 +121,7 @@ const commandPlaybook = [
     detail: 'Start with the web flow first so consent and command snippets are generated from the same backend session.',
     commands: [
       '# Visit website',
-      'http://localhost:3000',
+      'http://157.180.74.2',
       '',
       '# In browser:',
       '1) Create account or login',
@@ -134,7 +134,7 @@ const commandPlaybook = [
     title: 'Clone + Backend Boot',
     detail: 'Use local backend in dev mode so the job IDs from website and CLI match exactly.',
     commands: [
-      'git clone https://github.com/<owner>/<repo>.git',
+      'git clone https://github.com/samarthnaikk/rvidia1a.git',
       'cd rvidia1a',
       'python -m venv .venv',
       'source .venv/bin/activate',
@@ -148,10 +148,10 @@ const commandPlaybook = [
     detail: 'Run commands from accepted dashboard cards or execute manually using the same --api-base and --job-id.',
     commands: [
       '# Receiver terminal',
-      'python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token <JWT> --job-id <JOB_ID> --repo-url "https://github.com/<owner>/<repo>" --branch "main"',
+      'python -m app.core.p2p_cli receiver --api-base http://157.180.74.2 --token <JWT> --job-id <JOB_ID> --repo-url "https://github.com/samarthnaikk/rvidia1a" --branch "main"',
       '',
       '# Host terminal',
-      'python -m app.core.p2p_cli host --api-base http://localhost:8000 --token <JWT> --job-id <JOB_ID>',
+      'python -m app.core.p2p_cli host --api-base http://157.180.74.2 --token <JWT> --job-id <JOB_ID>',
     ],
   },
   {
@@ -159,7 +159,7 @@ const commandPlaybook = [
     title: 'Observe Checkpoints + Results',
     detail: 'Inspect runtime progression from backend and verify artifacts/logs in both terminal output and job result pages.',
     commands: [
-      'curl -H "Authorization: Bearer <JWT>" http://localhost:8000/p2p/jobs/<JOB_ID>/peers',
+      'curl -H "Authorization: Bearer <JWT>" http://157.180.74.2/p2p/jobs/<JOB_ID>/peers',
       '',
       '# Look for:',
       'checkpoint_phase',
