@@ -47,10 +47,12 @@ python -m app.core.client_cli --help
 Interactive mode (menu-driven, minimal typing):
 
 ```bash
+pip install -r backend/requirements.txt
 python -m app.core.client_cli tui --api-base http://localhost:8000
 ```
 
 TUI highlights:
+- Built with Textual and themed to match the website's dark + neon green look
 - Job picker menus for access, host, and receiver actions (no need to paste IDs each time)
 - Auto-filled repo/branch for receiver when available
 - Runtime API base switching from inside the menu

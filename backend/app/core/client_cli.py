@@ -1,5 +1,5 @@
 import argparse
-import getpass
+import asyncio
 import json
 import os
 import subprocess
@@ -259,308 +259,364 @@ def cmd_p2p_receiver(args: argparse.Namespace) -> None:
     _run_p2p_subcommand(args, "receiver")
 
 
-def _prompt(label: str, default: str | None = None, secret: bool = False, required: bool = False) -> str:
-    while True:
-        prompt_label = label
-        if default is not None and default != "":
-            prompt_label += f" [{default}]"
-        prompt_label += ": "
-
-        value = getpass.getpass(prompt_label) if secret else input(prompt_label)
-        value = value.strip()
-
-        if value:
-            return value
-        if default is not None:
-            return default
-        if not required:
-            return ""
-        print("Value is required.")
-
-
-def _to_bool(value: str) -> bool:
-    return value.strip().lower() in {"y", "yes", "true", "1"}
-
-
-def _short(text: str, width: int) -> str:
-    if len(text) <= width:
-        return text
-    return text[: width - 1] + "~"
-
-
-def _fmt_timestamp(value: str | None) -> str:
-    if not value:
-        return "-"
-    try:
-        dt = datetime.fromisoformat(value)
-        return dt.strftime("%m-%d %H:%M")
-    except ValueError:
-        return value
-
-
-def _print_job_picker(title: str, jobs: list[dict[str, Any]]) -> None:
-    print(f"\n{title}")
-    print("=" * len(title))
-    if not jobs:
-        print("No jobs found.")
-        return
-
-    print(f"{'No':<4}{'Job ID':<14}{'Status':<14}{'Access':<12}{'Repo/File':<36}{'Created':<12}")
-    print("-" * 92)
-    for idx, job in enumerate(jobs, start=1):
-        job_id = str(job.get("id") or "")
-        status = str(job.get("status") or "-")
-        access = str(job.get("access_status") or "-")
-        repo_or_file = str(job.get("repo_url") or job.get("filename") or "-")
-        created = _fmt_timestamp(job.get("created_at"))
-        print(
-            f"{idx:<4}{_short(job_id, 12):<14}{_short(status, 12):<14}{_short(access, 10):<12}{_short(repo_or_file, 34):<36}{_short(created, 11):<12}"
-        )
-
-
-def _fetch_jobs(api_base: str, open_only: bool = False) -> list[dict[str, Any]]:
-    token = _resolve_token(None)
-    path = "/jobs/open" if open_only else "/jobs"
-    data = _api_request("GET", api_base, path, token=token)
-    return data if isinstance(data, list) else []
-
-
-def _fetch_marketplace_jobs(api_base: str) -> list[dict[str, Any]]:
-    token = _resolve_token(None)
-    data = _api_request("GET", api_base, "/p2p/jobs", token=token)
-    return data if isinstance(data, list) else []
-
-
-def _select_job(
-    api_base: str,
-    source: str,
-    title: str,
-    open_only: bool = False,
-    allow_manual: bool = True,
-) -> dict[str, Any] | None:
-    while True:
-        jobs = _fetch_jobs(api_base, open_only=open_only) if source == "my" else _fetch_marketplace_jobs(api_base)
-        _print_job_picker(title, jobs)
-
-        if jobs:
-            prompt = "Select job number"
-        else:
-            prompt = "No jobs available"
-
-        suffix = " (r=refresh"
-        if allow_manual:
-            suffix += ", m=manual ID"
-        suffix += ", q=cancel)"
-
-        choice = _prompt(f"{prompt}{suffix}", required=True).lower()
-        if choice == "q":
-            return None
-        if choice == "r":
-            continue
-        if allow_manual and choice == "m":
-            manual_id = _prompt("Enter Job ID", required=True)
-            return {"id": manual_id}
-
-        if choice.isdigit():
-            index = int(choice)
-            if 1 <= index <= len(jobs):
-                return jobs[index - 1]
-
-        print("Invalid selection. Pick a listed number, r, m, or q.")
-
-
-def _print_tui_header(api_base: str) -> None:
-    print("\nRVIDIA Control Center")
-    print("=====================")
-    print(f"API: {api_base}")
-    try:
-        me = _api_request("GET", api_base, "/auth/me", token=_resolve_token(None))
-        username = me.get("username") if isinstance(me, dict) else None
-        email = me.get("email") if isinstance(me, dict) else None
-        print(f"User: {username or '-'} ({email or '-'})")
-    except RuntimeError:
-        print("User: not logged in")
-
-
 def cmd_tui(args: argparse.Namespace) -> None:
-    api_base = _resolve_api_base(args.api_base)
-    print("Launching interactive mode. Type option numbers to run actions.")
+    try:
+        from textual.app import App
+        from textual.containers import Horizontal, Vertical
+        from textual.screen import ModalScreen
+        from textual.widgets import Button, DataTable, Footer, Header, Input, Label, OptionList, RichLog, Static
+    except ImportError as exc:
+        raise RuntimeError("Textual is not installed. Install dependencies with 'pip install -r backend/requirements.txt'.") from exc
 
-    while True:
-        _print_tui_header(api_base)
-        print("\nMain Menu")
-        print("---------")
-        print(" 1) Login")
-        print(" 2) Signup")
-        print(" 3) Whoami")
-        print(" 4) Create Job")
-        print(" 5) List My Jobs")
-        print(" 6) List Marketplace Jobs")
-        print(" 7) Request Access (job picker)")
-        print(" 8) Accept Access (job picker)")
-        print(" 9) Show Access State (job picker)")
-        print("10) Run P2P Host (job picker)")
-        print("11) Run P2P Receiver (job picker + auto-fill)")
-        print("12) Switch API Base")
-        print("13) Logout")
-        print(" 0) Exit")
+    class FormScreen(ModalScreen):
+        CSS = """
+        FormScreen {
+            align: center middle;
+            background: #020711 80%;
+        }
+        #form-box {
+            width: 72;
+            max-width: 92;
+            border: round #95f2bd;
+            background: #0b1322;
+            padding: 1 2;
+        }
+        .form-title { color: #95f2bd; text-style: bold; margin-bottom: 1; }
+        .form-label { color: #e5e7eb; margin-top: 1; }
+        #form-error { color: #ff6b6b; margin-top: 1; }
+        #form-actions { margin-top: 1; height: auto; }
+        Button { margin-right: 1; }
+        """
 
-        choice = _prompt("Choice", required=True)
+        def __init__(self, title: str, fields: list[dict[str, Any]]) -> None:
+            super().__init__()
+            self.form_title = title
+            self.fields = fields
 
-        try:
-            if choice == "1":
-                username_or_email = _prompt("Username or email", required=True)
-                password = _prompt("Password", secret=True, required=True)
-                cmd_login(
-                    argparse.Namespace(
-                        api_base=api_base,
-                        username_or_email=username_or_email,
-                        password=password,
-                    )
-                )
-            elif choice == "2":
-                username = _prompt("Username", required=True)
-                email = _prompt("Email", required=True)
-                password = _prompt("Password", secret=True, required=True)
-                confirm_password = _prompt("Confirm password", secret=True, required=True)
-                cmd_signup(
-                    argparse.Namespace(
-                        api_base=api_base,
-                        username=username,
-                        email=email,
-                        password=password,
-                        confirm_password=confirm_password,
-                    )
-                )
-            elif choice == "3":
-                cmd_whoami(argparse.Namespace(api_base=api_base, token=None))
-            elif choice == "4":
-                repo_url = _prompt("Repo URL", required=True)
-                branch = _prompt("Branch", default="main")
-                command = _prompt("Command (optional)", default="")
-                cmd_create_job(
-                    argparse.Namespace(
-                        api_base=api_base,
-                        token=None,
-                        repo_url=repo_url,
-                        branch=branch,
-                        command=command,
-                    )
-                )
-            elif choice == "5":
-                open_only = _to_bool(_prompt("Open jobs only? (y/N)", default="n"))
-                cmd_list_jobs(argparse.Namespace(api_base=api_base, token=None, open=open_only))
-            elif choice == "6":
-                cmd_list_marketplace(argparse.Namespace(api_base=api_base, token=None))
-            elif choice == "7":
-                selected = _select_job(
-                    api_base,
-                    source="market",
-                    title="Marketplace Jobs (request access)",
-                    allow_manual=True,
-                )
-                if selected is None:
-                    continue
-                job_id = str(selected.get("id") or "")
-                cmd_request_access(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
-            elif choice == "8":
-                selected = _select_job(
-                    api_base,
-                    source="my",
-                    title="Your Jobs (accept access)",
-                    allow_manual=True,
-                )
-                if selected is None:
-                    continue
-                job_id = str(selected.get("id") or "")
-                cmd_accept_access(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
-            elif choice == "9":
-                source_choice = _prompt("Check access for (1=my jobs, 2=marketplace)", default="1")
-                source = "market" if source_choice == "2" else "my"
-                selected = _select_job(
-                    api_base,
-                    source=source,
-                    title="Pick Job (access state)",
-                    allow_manual=True,
-                )
-                if selected is None:
-                    continue
-                job_id = str(selected.get("id") or "")
-                cmd_access_state(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
-            elif choice == "10":
-                selected = _select_job(
-                    api_base,
-                    source="my",
-                    title="Your Jobs (run host)",
-                    open_only=True,
-                    allow_manual=True,
-                )
-                if selected is None:
-                    continue
-                job_id = str(selected.get("id") or "")
-                workspace = _prompt("Workspace", default="./.p2p-workspaces")
-                no_request_access = _to_bool(_prompt("Disable auto request-access? (y/N)", default="n"))
-                secret_key = _prompt("Secret key (optional)", default="")
-                cmd_p2p_host(
-                    argparse.Namespace(
-                        api_base=api_base,
-                        token=None,
-                        job_id=job_id,
-                        workspace=workspace,
-                        no_request_access=no_request_access,
-                        secret_key=secret_key or None,
-                    )
-                )
-            elif choice == "11":
-                selected = _select_job(
-                    api_base,
-                    source="my",
-                    title="Your Jobs (run receiver)",
-                    open_only=True,
-                    allow_manual=True,
-                )
-                if selected is None:
-                    continue
-                job_id = str(selected.get("id") or "")
+        def compose(self):
+            with Vertical(id="form-box"):
+                yield Static(self.form_title, classes="form-title")
+                for field in self.fields:
+                    key = str(field["key"])
+                    yield Label(str(field["label"]), classes="form-label")
+                    yield Input(value=str(field.get("default") or ""), password=bool(field.get("password", False)), id=f"field-{key}")
+                yield Static("", id="form-error")
+                with Horizontal(id="form-actions"):
+                    yield Button("Submit", id="form-submit", variant="success")
+                    yield Button("Cancel", id="form-cancel", variant="default")
 
-                default_repo = str(selected.get("repo_url") or "")
-                default_branch = str(selected.get("branch") or "main")
-                repo_url = _prompt("Repo URL", default=default_repo, required=not bool(default_repo))
-                branch = _prompt("Branch", default=default_branch)
-                docker_args = _prompt("Docker args (optional)", default="")
-                host_node_id = _prompt("Host node ID (optional)", default="")
-                output_dir = _prompt("Output directory", default="./outputs")
-                workspace = _prompt("Workspace", default="./.p2p-workspaces")
-                secret_key = _prompt("Secret key (optional)", default="")
-                cmd_p2p_receiver(
-                    argparse.Namespace(
-                        api_base=api_base,
-                        token=None,
-                        job_id=job_id,
-                        repo_url=repo_url,
-                        branch=branch,
-                        docker_args=docker_args,
-                        host_node_id=host_node_id,
-                        output_dir=output_dir,
-                        workspace=workspace,
-                        secret_key=secret_key or None,
-                    )
-                )
-            elif choice == "12":
-                new_base = _prompt("New API base", default=api_base, required=True)
-                api_base = _resolve_api_base(new_base)
-                print(f"API base set to: {api_base}")
-            elif choice == "13":
-                cmd_logout(argparse.Namespace())
-            elif choice == "0":
-                print("Exiting TUI.")
+        def _collect_values(self):
+            values: dict[str, str] = {}
+            for field in self.fields:
+                key = str(field["key"])
+                value = self.query_one(f"#field-{key}", Input).value.strip()
+                if bool(field.get("required", False)) and not value:
+                    self.query_one("#form-error", Static).update(f"{field['label']} is required")
+                    return None
+                values[key] = value
+            return values
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "form-cancel":
+                self.dismiss(None)
                 return
-            else:
-                print("Unknown choice. Please select a number from the menu.")
-        except (RuntimeError, subprocess.CalledProcessError) as exc:
-            print(f"Error: {exc}")
-        except KeyboardInterrupt:
-            print("\nCancelled current action.")
+            values = self._collect_values()
+            if values is not None:
+                self.dismiss(values)
+
+        def on_input_submitted(self, _) -> None:
+            values = self._collect_values()
+            if values is not None:
+                self.dismiss(values)
+
+    class JobPickerScreen(ModalScreen):
+        CSS = """
+        JobPickerScreen {
+            align: center middle;
+            background: #020711 80%;
+        }
+        #picker-box {
+            width: 110;
+            max-width: 120;
+            height: 32;
+            border: round #95f2bd;
+            background: #0b1322;
+            padding: 1;
+        }
+        .picker-title { color: #95f2bd; text-style: bold; margin: 0 1 1 1; }
+        #picker-table { height: 1fr; margin: 0 1; }
+        #picker-input { margin: 1 1 0 1; }
+        #picker-error { color: #ff6b6b; margin: 0 1; }
+        #picker-actions { height: auto; margin: 1 1 0 1; }
+        Button { margin-right: 1; }
+        """
+
+        def __init__(self, title: str, jobs: list[dict[str, Any]]) -> None:
+            super().__init__()
+            self.picker_title = title
+            self.jobs = jobs
+
+        def compose(self):
+            with Vertical(id="picker-box"):
+                yield Static(self.picker_title, classes="picker-title")
+                yield DataTable(id="picker-table")
+                yield Input(placeholder="Enter row number or manual Job ID", id="picker-input")
+                yield Static("", id="picker-error")
+                with Horizontal(id="picker-actions"):
+                    yield Button("Select", id="picker-select", variant="success")
+                    yield Button("Cancel", id="picker-cancel", variant="default")
+
+        def on_mount(self) -> None:
+            table = self.query_one("#picker-table", DataTable)
+            table.cursor_type = "row"
+            table.add_columns("No", "Job ID", "Status", "Access", "Repo/File")
+            if not self.jobs:
+                table.add_row("-", "-", "-", "-", "No jobs")
+                return
+            for index, job in enumerate(self.jobs, start=1):
+                table.add_row(str(index), str(job.get("id") or ""), str(job.get("status") or "-"), str(job.get("access_status") or "-"), str(job.get("repo_url") or job.get("filename") or "-"))
+
+        def _selected_job(self):
+            raw = self.query_one("#picker-input", Input).value.strip()
+            if not raw:
+                self.query_one("#picker-error", Static).update("Type a row number or manual Job ID")
+                return None
+            if raw.isdigit() and self.jobs:
+                idx = int(raw)
+                if 1 <= idx <= len(self.jobs):
+                    return self.jobs[idx - 1]
+                self.query_one("#picker-error", Static).update("Row number out of range")
+                return None
+            return {"id": raw}
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "picker-cancel":
+                self.dismiss(None)
+                return
+            selected = self._selected_job()
+            if selected is not None:
+                self.dismiss(selected)
+
+        def on_input_submitted(self, _) -> None:
+            selected = self._selected_job()
+            if selected is not None:
+                self.dismiss(selected)
+
+    class RvidiaTextualApp(App):
+        CSS = """
+        Screen { background: #020711; color: #e5e7eb; }
+        Header { background: #0f1624; color: #95f2bd; text-style: bold; }
+        Footer { background: #090f16; color: #e5e7eb; }
+        #layout { height: 1fr; }
+        #actions-pane { width: 34; border: round #95f2bd; margin: 1 1 1 1; background: #0b1322; }
+        #actions-title { color: #95f2bd; text-style: bold; margin: 1; }
+        #actions { margin: 0 1 1 1; height: 1fr; background: #08101d; }
+        #main-pane { border: round #7e8784; margin: 1 1 1 0; background: #0b1322; padding: 0 1 1 1; }
+        #status { color: #b9cbbb; margin: 1 0; }
+        #jobs-table { height: 14; margin-bottom: 1; background: #060b14; }
+        #log-title { color: #95f2bd; text-style: bold; margin: 0 0 1 0; }
+        #log { height: 1fr; background: #060b14; border: round #7e8784; }
+        """
+
+        BINDINGS = [("q", "quit", "Quit"), ("r", "refresh", "Refresh")]
+
+        ACTIONS = [
+            ("login", "1. Login"),
+            ("signup", "2. Signup"),
+            ("whoami", "3. Whoami"),
+            ("create_job", "4. Create Job"),
+            ("list_jobs", "5. List My Jobs"),
+            ("marketplace", "6. List Marketplace"),
+            ("request_access", "7. Request Access"),
+            ("accept_access", "8. Accept Access"),
+            ("access_state", "9. Show Access State"),
+            ("p2p_host", "10. Run P2P Host"),
+            ("p2p_receiver", "11. Run P2P Receiver"),
+            ("switch_api", "12. Switch API Base"),
+            ("logout", "13. Logout"),
+        ]
+
+        def __init__(self, api_base: str) -> None:
+            super().__init__()
+            self.api_base = api_base
+            self.my_jobs: list[dict[str, Any]] = []
+            self.market_jobs: list[dict[str, Any]] = []
+
+        def compose(self):
+            yield Header(show_clock=True)
+            with Horizontal(id="layout"):
+                with Vertical(id="actions-pane"):
+                    yield Static("RVIDIA Actions", id="actions-title")
+                    yield OptionList(*[label for _, label in self.ACTIONS], id="actions")
+                with Vertical(id="main-pane"):
+                    yield Static("", id="status")
+                    yield DataTable(id="jobs-table")
+                    yield Static("Activity", id="log-title")
+                    yield RichLog(id="log", wrap=True, markup=False)
+            yield Footer()
+
+        async def on_mount(self) -> None:
+            self.query_one("#jobs-table", DataTable).cursor_type = "row"
+            await self.action_refresh()
+
+        async def action_refresh(self) -> None:
+            try:
+                self.my_jobs = await asyncio.to_thread(self._get_jobs, False)
+                self.market_jobs = await asyncio.to_thread(self._get_market_jobs)
+                self._set_status()
+                self._render_jobs_table(self.my_jobs, "My Jobs")
+                self._log("Refreshed jobs and marketplace lists")
+            except RuntimeError as exc:
+                self._log(f"Refresh failed: {exc}", error=True)
+
+        def _set_status(self) -> None:
+            user_text = "not logged in"
+            try:
+                me = _api_request("GET", self.api_base, "/auth/me", token=_resolve_token(None))
+                if isinstance(me, dict):
+                    user_text = f"{me.get('username', '-')} ({me.get('email', '-')})"
+            except RuntimeError:
+                pass
+            self.query_one("#status", Static).update(
+                f"API: {self.api_base} | User: {user_text} | My jobs: {len(self.my_jobs)} | Marketplace: {len(self.market_jobs)}"
+            )
+
+        def _render_jobs_table(self, jobs: list[dict[str, Any]], title: str) -> None:
+            table = self.query_one("#jobs-table", DataTable)
+            table.clear(columns=True)
+            table.add_columns(f"{title} #", "Job ID", "Status", "Access", "Repo/File", "Created")
+            if not jobs:
+                table.add_row("-", "-", "-", "-", "No jobs", "-")
+                return
+            for idx, job in enumerate(jobs, start=1):
+                created = str(job.get("created_at") or "")
+                try:
+                    created = datetime.fromisoformat(created).strftime("%m-%d %H:%M") if created else "-"
+                except ValueError:
+                    pass
+                table.add_row(str(idx), str(job.get("id") or ""), str(job.get("status") or "-"), str(job.get("access_status") or "-"), str(job.get("repo_url") or job.get("filename") or "-"), created)
+
+        def _log(self, message: str, data: Any | None = None, error: bool = False) -> None:
+            log = self.query_one("#log", RichLog)
+            log.write(("[ERROR] " if error else "[OK] ") + message)
+            if data is not None:
+                log.write(json.dumps(data, indent=2, default=str))
+
+        def _get_jobs(self, open_only: bool = False) -> list[dict[str, Any]]:
+            token = _resolve_token(None)
+            data = _api_request("GET", self.api_base, "/jobs/open" if open_only else "/jobs", token=token)
+            return data if isinstance(data, list) else []
+
+        def _get_market_jobs(self) -> list[dict[str, Any]]:
+            token = _resolve_token(None)
+            data = _api_request("GET", self.api_base, "/p2p/jobs", token=token)
+            return data if isinstance(data, list) else []
+
+        async def on_option_list_option_selected(self, event) -> None:
+            await self._run_action(self.ACTIONS[event.option_index][0])
+
+        async def _pick_job(self, title: str, use_market: bool = False, open_only: bool = False):
+            jobs = self.market_jobs if use_market else self.my_jobs
+            if open_only:
+                jobs = [j for j in jobs if str(j.get("status") or "") in {"queued", "in_progress", "transferring"}]
+            return await self.push_screen_wait(JobPickerScreen(title, jobs))
+
+        async def _run_action(self, action_key: str) -> None:
+            try:
+                if action_key == "login":
+                    values = await self.push_screen_wait(FormScreen("Login", [{"key": "username_or_email", "label": "Username or email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}]))
+                    if not values:
+                        return
+                    payload = _api_request("POST", self.api_base, "/auth/login", payload=values)
+                    token = str(payload.get("access_token") or "")
+                    if not token:
+                        raise RuntimeError("Login succeeded but no access_token was returned")
+                    session_payload = {"api_base": self.api_base, "access_token": token}
+                    try:
+                        session_payload["user"] = _api_request("GET", self.api_base, "/auth/me", token=token)
+                    except RuntimeError:
+                        pass
+                    _save_session(session_payload)
+                    self._log("Logged in and session saved")
+                    await self.action_refresh()
+                elif action_key == "signup":
+                    values = await self.push_screen_wait(FormScreen("Signup", [{"key": "username", "label": "Username", "required": True}, {"key": "email", "label": "Email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}, {"key": "confirm_password", "label": "Confirm password", "password": True, "required": True}]))
+                    if not values:
+                        return
+                    self._log("Signup completed", _api_request("POST", self.api_base, "/auth/signup", payload=values))
+                elif action_key == "whoami":
+                    self._log("Current user", _api_request("GET", self.api_base, "/auth/me", token=_resolve_token(None)))
+                elif action_key == "create_job":
+                    values = await self.push_screen_wait(FormScreen("Create Job", [{"key": "repo_url", "label": "Repo URL", "required": True}, {"key": "branch", "label": "Branch", "default": "main"}, {"key": "command", "label": "Command (optional)", "default": ""}]))
+                    if not values:
+                        return
+                    self._log("Job created", _api_request("POST", self.api_base, "/jobs", token=_resolve_token(None), payload=values))
+                    await self.action_refresh()
+                elif action_key == "list_jobs":
+                    self._render_jobs_table(self.my_jobs, "My Jobs")
+                    self._log("Displayed your jobs", self.my_jobs)
+                elif action_key == "marketplace":
+                    self._render_jobs_table(self.market_jobs, "Marketplace")
+                    self._log("Displayed marketplace jobs", self.market_jobs)
+                elif action_key == "request_access":
+                    selected = await self._pick_job("Pick marketplace job", use_market=True)
+                    if not selected:
+                        return
+                    job_id = str(selected.get("id") or "")
+                    self._log(f"Requested access for job {job_id}", _api_request("POST", self.api_base, f"/p2p/jobs/{job_id}/request-access", token=_resolve_token(None), payload={}))
+                    await self.action_refresh()
+                elif action_key == "accept_access":
+                    selected = await self._pick_job("Pick your job to accept access")
+                    if not selected:
+                        return
+                    job_id = str(selected.get("id") or "")
+                    self._log(f"Accepted access for job {job_id}", _api_request("POST", self.api_base, f"/p2p/jobs/{job_id}/accept-access", token=_resolve_token(None), payload={}))
+                    await self.action_refresh()
+                elif action_key == "access_state":
+                    values = await self.push_screen_wait(FormScreen("Access State Source", [{"key": "source", "label": "Type 'my' or 'market'", "default": "my", "required": True}]))
+                    if not values:
+                        return
+                    selected = await self._pick_job("Pick job for access state", use_market=values["source"].strip().lower() == "market")
+                    if not selected:
+                        return
+                    job_id = str(selected.get("id") or "")
+                    self._log(f"Access state for {job_id}", _api_request("GET", self.api_base, f"/p2p/jobs/{job_id}/access", token=_resolve_token(None)))
+                elif action_key == "p2p_host":
+                    selected = await self._pick_job("Pick your job for host", open_only=True)
+                    if not selected:
+                        return
+                    values = await self.push_screen_wait(FormScreen("Host Options", [{"key": "workspace", "label": "Workspace", "default": "./.p2p-workspaces"}, {"key": "disable_request", "label": "Disable auto request-access (y/n)", "default": "n"}, {"key": "secret_key", "label": "Secret key (optional)", "default": ""}]))
+                    if not values:
+                        return
+                    await asyncio.to_thread(_run_p2p_subcommand, argparse.Namespace(api_base=self.api_base, token=None, job_id=str(selected.get("id") or ""), workspace=values["workspace"] or "./.p2p-workspaces", no_request_access=values["disable_request"].strip().lower() in {"y", "yes", "1", "true"}, secret_key=values["secret_key"] or None), "host")
+                    self._log("Host run completed")
+                elif action_key == "p2p_receiver":
+                    selected = await self._pick_job("Pick your job for receiver", open_only=True)
+                    if not selected:
+                        return
+                    default_repo = str(selected.get("repo_url") or "")
+                    values = await self.push_screen_wait(FormScreen("Receiver Options", [{"key": "repo_url", "label": "Repo URL", "default": default_repo, "required": not bool(default_repo)}, {"key": "branch", "label": "Branch", "default": str(selected.get("branch") or "main")}, {"key": "docker_args", "label": "Docker args (optional)", "default": ""}, {"key": "host_node_id", "label": "Host node ID (optional)", "default": ""}, {"key": "output_dir", "label": "Output directory", "default": "./outputs"}, {"key": "workspace", "label": "Workspace", "default": "./.p2p-workspaces"}, {"key": "secret_key", "label": "Secret key (optional)", "default": ""}]))
+                    if not values:
+                        return
+                    await asyncio.to_thread(_run_p2p_subcommand, argparse.Namespace(api_base=self.api_base, token=None, job_id=str(selected.get("id") or ""), repo_url=values["repo_url"], branch=values["branch"] or "main", docker_args=values["docker_args"], host_node_id=values["host_node_id"], output_dir=values["output_dir"] or "./outputs", workspace=values["workspace"] or "./.p2p-workspaces", secret_key=values["secret_key"] or None), "receiver")
+                    self._log("Receiver run completed")
+                elif action_key == "switch_api":
+                    values = await self.push_screen_wait(FormScreen("Switch API Base", [{"key": "api_base", "label": "API base", "default": self.api_base, "required": True}]))
+                    if not values:
+                        return
+                    self.api_base = _resolve_api_base(values["api_base"])
+                    self._log(f"API base switched to {self.api_base}")
+                    await self.action_refresh()
+                elif action_key == "logout":
+                    _clear_session()
+                    self._log("Logged out and cleared local session")
+                    await self.action_refresh()
+            except (RuntimeError, subprocess.CalledProcessError) as exc:
+                self._log(str(exc), error=True)
+
+    api_base = _resolve_api_base(args.api_base)
+    app = RvidiaTextualApp(api_base=api_base)
+    app.run()
 
 
 def build_parser() -> argparse.ArgumentParser:
