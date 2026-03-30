@@ -1,0 +1,7 @@
+fastapi
+sqlalchemy
+passlib[bcrypt]
+python-jose
+pydantic
+email-validator
+psycopg2-binary
