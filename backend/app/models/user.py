@@ -8,3 +8,5 @@ class User(Base):
     username = Column(String, unique=True, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
+    google_id = Column(String, nullable=True)
+    auth_provider = Column(String, default="email")
