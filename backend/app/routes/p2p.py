@@ -89,6 +89,10 @@ def _is_stale(heartbeat: datetime | None, now: datetime) -> bool:
 
 
 def _apply_stale_failover(job: Job, now: datetime) -> bool:
+    # Do not mutate terminal jobs; heartbeats naturally stop after completion.
+    if job.status in {"completed", "failed"}:
+        return False
+
     changed = False
     host_stale = bool(job.host_node_id) and _is_stale(job.host_heartbeat_at, now)
     receiver_stale = bool(job.receiver_node_id) and _is_stale(job.receiver_heartbeat_at, now)
