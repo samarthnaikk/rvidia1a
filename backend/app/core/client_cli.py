@@ -590,19 +590,12 @@ def cmd_tui(args: argparse.Namespace) -> None:
             data = _api_request("GET", self.api_base, "/p2p/jobs", token=token)
             return data if isinstance(data, list) else []
 
-        async def on_option_list_option_selected(self, event) -> None:
-            await self._run_action(self.ACTIONS[event.option_index][0])
+        def on_option_list_option_selected(self, event) -> None:
+            action_key = self.ACTIONS[event.option_index][0]
+            self.run_worker(self._run_action(action_key), exclusive=True, group="actions")
 
         async def _push_screen_result(self, screen):
-            loop = asyncio.get_running_loop()
-            result_future = loop.create_future()
-
-            def _on_dismiss(result) -> None:
-                if not result_future.done():
-                    result_future.set_result(result)
-
-            self.push_screen(screen, callback=_on_dismiss)
-            return await result_future
+            return await self.push_screen_wait(screen)
 
         async def _pick_job(self, title: str, use_market: bool = False, open_only: bool = False):
             jobs = self.market_jobs if use_market else self.my_jobs
