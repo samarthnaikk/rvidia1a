@@ -1,8 +1,12 @@
+from datetime import datetime
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.job import Job
+from app.models.p2p_signal import P2PSignal
 from app.models.user import User
 from app.routes.auth import get_current_user
 from app.schemas.job import (
@@ -18,10 +22,6 @@ from app.schemas.job import (
 router = APIRouter()
 
 
-# In-memory signaling queue for MVP coordination only.
-_SIGNALS: dict[str, list[dict]] = {}
-
-
 def _get_job_for_user(job_id: str, user_id: int, db: Session) -> Job:
     job = db.query(Job).filter(Job.id == job_id, Job.user_id == user_id).first()
     if not job:
@@ -34,12 +34,6 @@ def _get_job(job_id: str, db: Session) -> Job:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
-
-
-def _queue_signal(job_id: str, signal: dict) -> None:
-    if job_id not in _SIGNALS:
-        _SIGNALS[job_id] = []
-    _SIGNALS[job_id].append(signal)
 
 
 def _is_owner(job: Job, user: User) -> bool:
@@ -259,15 +253,17 @@ def push_offer(
 ):
     job = _get_job(job_id, db)
     _ensure_participant_access(job, current_user)
-    _queue_signal(
-        job_id,
-        {
-            "type": "offer",
-            "from_node_id": payload.from_node_id,
-            "to_node_id": payload.to_node_id,
-            "offer": payload.offer,
-        },
-    )
+    db.add(P2PSignal(
+        id=str(uuid4()),
+        job_id=job_id,
+        from_node_id=payload.from_node_id,
+        to_node_id=payload.to_node_id,
+        signal_type="offer",
+        payload=payload.offer,
+        delivered=False,
+        created_at=datetime.utcnow(),
+    ))
+    db.commit()
     return {"queued": True}
 
 
@@ -280,15 +276,17 @@ def push_answer(
 ):
     job = _get_job(job_id, db)
     _ensure_participant_access(job, current_user)
-    _queue_signal(
-        job_id,
-        {
-            "type": "answer",
-            "from_node_id": payload.from_node_id,
-            "to_node_id": payload.to_node_id,
-            "answer": payload.answer,
-        },
-    )
+    db.add(P2PSignal(
+        id=str(uuid4()),
+        job_id=job_id,
+        from_node_id=payload.from_node_id,
+        to_node_id=payload.to_node_id,
+        signal_type="answer",
+        payload=payload.answer,
+        delivered=False,
+        created_at=datetime.utcnow(),
+    ))
+    db.commit()
     return {"queued": True}
 
 
@@ -301,15 +299,17 @@ def push_candidate(
 ):
     job = _get_job(job_id, db)
     _ensure_participant_access(job, current_user)
-    _queue_signal(
-        job_id,
-        {
-            "type": "candidate",
-            "from_node_id": payload.from_node_id,
-            "to_node_id": payload.to_node_id,
-            "candidate": payload.candidate,
-        },
-    )
+    db.add(P2PSignal(
+        id=str(uuid4()),
+        job_id=job_id,
+        from_node_id=payload.from_node_id,
+        to_node_id=payload.to_node_id,
+        signal_type="candidate",
+        payload=payload.candidate,
+        delivered=False,
+        created_at=datetime.utcnow(),
+    ))
+    db.commit()
     return {"queued": True}
 
 
@@ -322,15 +322,33 @@ def pull_signals(
 ):
     job = _get_job(job_id, db)
     _ensure_participant_access(job, current_user)
-    queue = _SIGNALS.get(job_id, [])
+
+    rows = (
+        db.query(P2PSignal)
+        .filter(
+            P2PSignal.job_id == job_id,
+            P2PSignal.to_node_id == node_id,
+            P2PSignal.delivered == False,  # noqa: E712
+        )
+        .order_by(P2PSignal.created_at.asc())
+        .all()
+    )
+
+    now = datetime.utcnow()
     deliver: list[dict] = []
-    remaining: list[dict] = []
-    for item in queue:
-        if item.get("to_node_id") == node_id:
-            deliver.append(item)
-        else:
-            remaining.append(item)
-    _SIGNALS[job_id] = remaining
+    for row in rows:
+        deliver.append({
+            "type": row.signal_type,
+            "from_node_id": row.from_node_id,
+            "to_node_id": row.to_node_id,
+            "offer": row.payload,  # CLI always reads the "offer" field
+        })
+        row.delivered = True
+        row.delivered_at = now
+
+    if rows:
+        db.commit()
+
     return {"signals": deliver}
 
 
