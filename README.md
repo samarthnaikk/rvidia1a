@@ -1,27 +1,25 @@
-<<<<<<< HEAD
-rvidia ka readme
-=======
-# Hackathon Homepage
+# Rvidia Hackathon
 
-React + Vite + Tailwind CSS setup for your cyber/AI-style landing page.
+Project repository with separated services.
 
-## Run locally
+## Structure
+
+- `frontend/` - React + Vite + Tailwind web app
+- `backend/` - backend service
+- `nginx/` - reverse proxy config
+- `postgres/` - database setup
+
+## Frontend local run
 
 ```bash
+cd frontend
 npm install
 npm run dev
 ```
 
-## Build
+## Frontend build
 
 ```bash
+cd frontend
 npm run build
 ```
-
-## Stack
-
-- React 19
-- Vite 8
-- Tailwind CSS 3.4
-- Space Grotesk font
->>>>>>> a64b8c5 (chore:project structure)
