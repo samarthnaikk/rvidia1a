@@ -2,8 +2,13 @@ import argparse
 import asyncio
 import inspect
 import json
+import platform
+import shlex
+import shutil
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -180,6 +185,32 @@ def _detect_gpu() -> dict[str, str | None]:
     return {"gpu_model": None, "gpu_vram": None, "gpu_driver": None}
 
 
+def _is_gpu_runtime_unavailable(stderr_or_logs: str) -> bool:
+    """Return True when output signals that a Docker GPU runtime is absent."""
+    lowered = stderr_or_logs.lower()
+    signals = [
+        "could not select device driver",
+        "capabilities: [[gpu]]",
+        "nvidia-container-cli: initialization error",
+        "wsl environment detected but no adapters were found",
+        "no cuda-capable device",
+        "unknown runtime specified nvidia",
+        "could not load nvml",
+    ]
+    return any(s in lowered for s in signals)
+
+
+def _is_wsl() -> bool:
+    """Return True when running inside Windows Subsystem for Linux."""
+    if platform.system() != "Linux":
+        return False
+    try:
+        proc_version = Path("/proc/version").read_text(errors="replace").lower()
+        return "microsoft" in proc_version or "wsl" in proc_version
+    except OSError:
+        return False
+
+
 # ── Docker helpers ────────────────────────────────────────────────────────────
 
 async def _run_command_with_logs(command: str, cwd: Path):
@@ -254,6 +285,7 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
     # Ensure destination directory exists and use absolute path (fixes IrohError).
     abs_output_path = Path(output_path).resolve()
     abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[RVIDIA] Writing artifact to: {abs_output_path}")
 
     if abs_output_path.exists():
         abs_output_path.unlink()
@@ -262,32 +294,46 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
         await blobs.write_to_path(ticket.hash(), str(abs_output_path))
         return abs_output_path
     except Exception as primary_error:
-        # Log directory permissions to stderr to aid debugging IrohError.
-        parent = abs_output_path.parent
+        # Log detailed diagnostics to aid debugging IrohError.
         import stat as _stat
+        parent = abs_output_path.parent
         try:
             mode = oct(_stat.S_IMODE(parent.stat().st_mode))
         except Exception:
             mode = "unknown"
         print(
             f"[RVIDIA] IrohError writing to '{abs_output_path}'. "
-            f"Parent dir '{parent}' permissions: {mode}",
+            f"Parent dir '{parent}' permissions: {mode}. "
+            f"Platform: {platform.system()}. WSL: {_is_wsl()}.",
             file=sys.stderr,
         )
 
-        fallback_path = abs_output_path.with_name(
-            f"{abs_output_path.stem}-{int(time.time())}{abs_output_path.suffix}"
-        )
-        if fallback_path.exists():
-            fallback_path.unlink()
+        # Strategy 2: write to a Linux-native temp dir, then copy to requested destination.
+        # This avoids iroh FFI failures on /mnt/c/... paths in WSL.
+        tmp_dir = Path(tempfile.gettempdir()) / "rvidia-iroh" / str(uuid.uuid4())
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / (abs_output_path.name or "artifact.bin")
+
         try:
-            await blobs.write_to_path(ticket.hash(), str(fallback_path))
-            return fallback_path
-        except Exception as fallback_error:
+            await blobs.write_to_path(ticket.hash(), str(tmp_path))
+        except Exception as tmp_error:
             raise RuntimeError(
-                f"Failed to write downloaded ticket to '{abs_output_path}' or fallback '{fallback_path}': "
-                f"{primary_error} | {fallback_error}"
-            ) from fallback_error
+                f"Failed to write downloaded ticket to '{abs_output_path}' (primary) "
+                f"and to temp path '{tmp_path}': {primary_error} | {tmp_error}"
+            ) from tmp_error
+
+        # Copy from temp to the requested destination.
+        abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(tmp_path), str(abs_output_path))
+            print(f"[RVIDIA] Artifact copied from temp '{tmp_path}' to '{abs_output_path}'.")
+            return abs_output_path
+        except Exception as copy_error:
+            # Keep the temp artifact so the user can recover it manually.
+            raise RuntimeError(
+                f"Wrote artifact to temp path '{tmp_path}' but could not copy to "
+                f"'{abs_output_path}': {copy_error}. Recover manually from temp path."
+            ) from copy_error
 
 
 # ── Signaling ─────────────────────────────────────────────────────────────────
@@ -361,11 +407,10 @@ async def _host_execute_docker(
     # 1. Clone the repository.
     repo_dir = workspace_dir / "repo"
     if repo_dir.exists():
-        import shutil
         shutil.rmtree(repo_dir)
 
-    clone_cmd = f"git clone --depth=1 --branch {branch} {repo_url} repo"
     print(f"[RVIDIA] Cloning {repo_url} (branch: {branch})...")
+    clone_cmd = f"git clone --depth=1 --branch {branch} {repo_url} repo"
     clone_proc, clone_logs, clone_captured = await _run_command_with_logs(clone_cmd, workspace_dir)
     async for line in clone_logs:
         print(f"[git] {line}")
@@ -387,19 +432,32 @@ async def _host_execute_docker(
 
     # 3. Docker run — GPU pass-through, /outputs volume, extra docker_args.
     abs_outputs = str(outputs_dir.resolve())
-    extra = docker_args.strip() if docker_args else ""
-    def _build_run_cmd(use_gpu: bool) -> str:
-        gpu_segment = "--gpus all " if use_gpu else ""
-        return (
-            f"docker run --rm {gpu_segment}"
-            f"-v {abs_outputs}:/outputs "
-            f"{extra} "
-            f"{image_tag}"
-        ).strip()
+
+    # Parse extra docker args safely to avoid quoting issues on Windows paths.
+    extra_args: list[str] = []
+    if docker_args and docker_args.strip():
+        try:
+            extra_args = shlex.split(docker_args, posix=False)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Failed to parse --docker-args {docker_args!r}: {exc}. "
+                "Hint: check quoting and special characters."
+            ) from exc
+
+    def _build_run_args(use_gpu: bool) -> list[str]:
+        cmd = ["docker", "run", "--rm"]
+        if use_gpu:
+            cmd += ["--gpus", "all"]
+        cmd += ["-v", f"{abs_outputs}:/outputs"]
+        cmd += extra_args
+        cmd.append(image_tag)
+        return cmd
 
     print(f"[RVIDIA] Running container '{image_tag}'...")
+    print(f"[RVIDIA] GPU requested: True")
     run_rc = 1
     run_captured: list[str] = []
+    execution_mode = "GPU"
 
     if prefer_gpu:
         # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
@@ -435,6 +493,9 @@ async def _host_execute_docker(
                 print(f"[docker run] {line}")
             run_rc = await cpu_proc.wait()
             run_captured.extend(["", "[CPU FALLBACK]"] + cpu_captured)
+            execution_mode = "CPU fallback"
+
+    print(f"[RVIDIA] Execution mode: {execution_mode}")
 
     # 4. Write execution log.
     logs_file = workspace_dir / "execution.log"
@@ -454,6 +515,11 @@ async def _host_execute_docker(
         )
         output_files = [fallback]
 
+    print(f"[RVIDIA] Collected {len(output_files)} output file(s)")
+    for out_file in output_files:
+        size = out_file.stat().st_size
+        print(f"[RVIDIA]   {out_file.name} ({size} bytes)")
+
     # 6. Share each output file as an iroh ticket and push signal.
     artifact_tickets: list[dict[str, str]] = []
     for out_file in output_files:
@@ -462,24 +528,59 @@ async def _host_execute_docker(
 
     logs_ticket = await _share_file_ticket(node, logs_file)
     success = run_rc == 0
+    transfer_id = str(uuid.uuid4())
 
-    _push_signal(
-        api_base=args.api_base,
-        token=args.token,
-        job_id=args.job_id,
-        from_node_id=node_id,
-        to_node_id=receiver_node_id,
-        message={
-            "type": "result_ticket",
-            "success": success,
-            "artifact_tickets": artifact_tickets,
-            # Legacy single-artifact fields for backwards compat.
-            "artifact_ticket": artifact_tickets[0]["ticket"] if artifact_tickets else "",
-            "artifact_name": artifact_tickets[0]["name"] if artifact_tickets else "",
-            "logs_ticket": logs_ticket,
-            "error_message": None if success else f"Container exited with code {run_rc}",
-        },
-    )
+    result_message = {
+        "type": "result_ticket",
+        "transfer_id": transfer_id,
+        "success": success,
+        "artifact_tickets": artifact_tickets,
+        # Legacy single-artifact fields for backwards compat.
+        "artifact_ticket": artifact_tickets[0]["ticket"] if artifact_tickets else "",
+        "artifact_name": artifact_tickets[0]["name"] if artifact_tickets else "",
+        "logs_ticket": logs_ticket,
+        "error_message": None if success else f"Container exited with code {run_rc}",
+    }
+
+    print(f"[RVIDIA] Publishing result_ticket with {len(artifact_tickets)} artifact ticket(s) (transfer_id={transfer_id})")
+
+    def _send_result_ticket() -> None:
+        _push_signal(
+            api_base=args.api_base,
+            token=args.token,
+            job_id=args.job_id,
+            from_node_id=node_id,
+            to_node_id=receiver_node_id,
+            message=result_message,
+        )
+
+    _send_result_ticket()
+
+    # 7. Wait for result_ack from renter (retry result_ticket every 3s up to 60s).
+    ack_timeout = 60
+    retry_interval = 3
+    ack_start = time.time()
+    retry_count = 0
+    ack_received = False
+
+    while not ack_received and (time.time() - ack_start) < ack_timeout:
+        await asyncio.sleep(retry_interval)
+        for signal in _pull_signals(args.api_base, args.token, args.job_id, node_id):
+            if signal.get("type") == "result_ack" and signal.get("transfer_id") == transfer_id:
+                ack_received = True
+                print(f"[RVIDIA] ACK received from renter (transfer_id={transfer_id})")
+                break
+        if not ack_received:
+            retry_count += 1
+            print(f"[RVIDIA] Retrying result_ticket (attempt {retry_count}, transfer_id={transfer_id})...")
+            _send_result_ticket()
+
+    if not ack_received:
+        print(
+            f"[RVIDIA] WARNING: artifact delivery unacknowledged after {ack_timeout}s "
+            f"(transfer_id={transfer_id}). Renter may not have received the artifacts.",
+            file=sys.stderr,
+        )
 
     _api_post(
         args.api_base,
@@ -666,10 +767,11 @@ async def run_receiver(args):
         if result is None:
             await asyncio.sleep(2)
 
+    transfer_id = str(result.get("transfer_id") or "")
     logs_ticket = str(result.get("logs_ticket") or "")
     success = bool(result.get("success"))
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Download all artifact files.
@@ -680,19 +782,75 @@ async def run_receiver(args):
             {"name": str(result.get("artifact_name") or "artifact.txt"), "ticket": str(result["artifact_ticket"])}
         ]
 
+    if not artifact_tickets:
+        raise RuntimeError(
+            f"result_ticket received but contains no artifact tickets "
+            f"(transfer_id={transfer_id or 'unknown'})"
+        )
+
+    artifact_names = [e.get("name", "artifact.bin") for e in artifact_tickets]
+    print(f"[RVIDIA] Received result_ticket: transfer_id={transfer_id}, {len(artifact_tickets)} artifact(s): {artifact_names}")
+
+    output_dir = Path(args.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[RVIDIA] Saving artifacts to: {output_dir}")
+
+    _DOWNLOAD_RETRIES = 3
+    _DOWNLOAD_RETRY_DELAY = 2
+
     saved_paths: list[Path] = []
     for entry in artifact_tickets:
         ticket_str = entry.get("ticket", "")
         name = entry.get("name", "artifact.bin")
-        if ticket_str:
-            path = await _download_ticket_to_path(node, ticket_str, output_dir / name)
-            saved_paths.append(path)
-            print(f"[RVIDIA] Artifact saved: {path}")
+        if not ticket_str:
+            print(f"[RVIDIA] WARNING: empty ticket for '{name}', skipping.", file=sys.stderr)
+            continue
+        last_err: Exception | None = None
+        for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+            try:
+                print(f"[RVIDIA] Downloading '{name}' (attempt {attempt}/{_DOWNLOAD_RETRIES})...")
+                path = await _download_ticket_to_path(node, ticket_str, output_dir / name)
+                saved_paths.append(path)
+                print(f"[RVIDIA] Artifact saved: {path}")
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                print(f"[RVIDIA] Download attempt {attempt} failed for '{name}': {exc}", file=sys.stderr)
+                if attempt < _DOWNLOAD_RETRIES:
+                    await asyncio.sleep(_DOWNLOAD_RETRY_DELAY)
+        if last_err is not None:
+            raise RuntimeError(f"Failed to download artifact '{name}' after {_DOWNLOAD_RETRIES} attempts: {last_err}") from last_err
 
     if logs_ticket:
-        logs_path = await _download_ticket_to_path(node, logs_ticket, output_dir / "execution.log")
-        for line in logs_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            print(f"Remote GPU > {line}")
+        for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+            try:
+                logs_path = await _download_ticket_to_path(node, logs_ticket, output_dir / "execution.log")
+                for line in logs_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    print(f"Remote GPU > {line}")
+                break
+            except Exception as exc:
+                print(f"[RVIDIA] Log download attempt {attempt} failed: {exc}", file=sys.stderr)
+                if attempt < _DOWNLOAD_RETRIES:
+                    await asyncio.sleep(_DOWNLOAD_RETRY_DELAY)
+
+    # Send ACK back to host so it stops retrying result_ticket.
+    if transfer_id and host_node_id:
+        print(f"[RVIDIA] Sending result_ack to host (transfer_id={transfer_id})...")
+        _push_signal(
+            api_base=args.api_base,
+            token=args.token,
+            job_id=args.job_id,
+            from_node_id=node_id,
+            to_node_id=host_node_id,
+            message={
+                "type": "result_ack",
+                "transfer_id": transfer_id,
+                "job_id": args.job_id,
+                "status": "received",
+            },
+        )
+        print(f"[RVIDIA] ACK dispatched (transfer_id={transfer_id})")
 
     _api_post(
         args.api_base,
