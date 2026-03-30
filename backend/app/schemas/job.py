@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -83,6 +84,14 @@ class RegisterHostRequest(BaseModel):
     memory_score: float | None = None
     machine_score: float | None = None
     ranking_version: str | None = None
+
+
+class AccessRequestPayload(BaseModel):
+    hardware_metadata: dict[str, Any] | None = None
+
+
+class AcceptAccessRequest(BaseModel):
+    requester_user_id: int | None = None
 
 
 class SignalOfferRequest(BaseModel):

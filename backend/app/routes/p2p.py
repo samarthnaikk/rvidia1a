@@ -10,6 +10,8 @@ from app.models.p2p_signal import P2PSignal
 from app.models.user import User
 from app.routes.auth import get_current_user
 from app.schemas.job import (
+    AcceptAccessRequest,
+    AccessRequestPayload,
     ArtifactStateUpdateRequest,
     JobCompletionRequest,
     JobUpdateStatusRequest,
@@ -21,6 +23,24 @@ from app.schemas.job import (
 )
 
 router = APIRouter()
+
+
+def _as_int(value: object) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_job_for_user(job_id: str, user_id: int, db: Session) -> Job:
@@ -169,6 +189,7 @@ def get_access_state(
 @router.post("/jobs/{job_id}/request-access")
 def request_access(
     job_id: str,
+    payload: AccessRequestPayload,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -181,6 +202,49 @@ def request_access(
     job.access_status = "requested"
     job.access_requested_by = current_user.id
     job.artifact_state = "PENDING"
+
+    metadata = payload.hardware_metadata or {}
+    if isinstance(metadata, dict):
+        # Compatibility path: allow browser-side specs to populate job metadata
+        # before host registration, so older UIs can still show machine details.
+        if metadata.get("cpu_model") and not job.cpu_model:
+            job.cpu_model = str(metadata.get("cpu_model"))
+        cpu_physical_cores = _as_int(metadata.get("cpu_physical_cores"))
+        if cpu_physical_cores is not None and not job.cpu_physical_cores:
+            job.cpu_physical_cores = cpu_physical_cores
+        cpu_logical_cores = _as_int(metadata.get("cpu_logical_cores"))
+        if cpu_logical_cores is not None and not job.cpu_logical_cores:
+            job.cpu_logical_cores = cpu_logical_cores
+        cpu_max_clock_mhz = _as_int(metadata.get("cpu_max_clock_mhz"))
+        if cpu_max_clock_mhz is not None and not job.cpu_max_clock_mhz:
+            job.cpu_max_clock_mhz = cpu_max_clock_mhz
+        if metadata.get("gpu_model") and not job.gpu_model:
+            job.gpu_model = str(metadata.get("gpu_model"))
+        if metadata.get("gpu_vram") and not job.gpu_vram:
+            job.gpu_vram = str(metadata.get("gpu_vram"))
+        if metadata.get("gpu_driver") and not job.gpu_driver:
+            job.gpu_driver = str(metadata.get("gpu_driver"))
+        gpu_vram_mb = _as_int(metadata.get("gpu_vram_mb"))
+        if gpu_vram_mb is not None and not job.gpu_vram_mb:
+            job.gpu_vram_mb = gpu_vram_mb
+        memory_total_mb = _as_int(metadata.get("memory_total_mb"))
+        if memory_total_mb is not None and not job.memory_total_mb:
+            job.memory_total_mb = memory_total_mb
+        cpu_score = _as_float(metadata.get("cpu_score"))
+        if cpu_score is not None and job.cpu_score is None:
+            job.cpu_score = cpu_score
+        gpu_score = _as_float(metadata.get("gpu_score"))
+        if gpu_score is not None and job.gpu_score is None:
+            job.gpu_score = gpu_score
+        memory_score = _as_float(metadata.get("memory_score"))
+        if memory_score is not None and job.memory_score is None:
+            job.memory_score = memory_score
+        machine_score = _as_float(metadata.get("machine_score"))
+        if machine_score is not None and job.machine_score is None:
+            job.machine_score = machine_score
+        if metadata.get("ranking_version") and not job.ranking_version:
+            job.ranking_version = str(metadata.get("ranking_version"))
+
     db.commit()
     db.refresh(job)
     return {"job_id": job.id, "access_status": job.access_status, "requested_by": current_user.id}
@@ -189,6 +253,7 @@ def request_access(
 @router.post("/jobs/{job_id}/accept-access")
 def accept_access(
     job_id: str,
+    payload: AcceptAccessRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -208,6 +273,69 @@ def accept_access(
         "host_node_id": job.host_node_id,
         "receiver_node_id": job.receiver_node_id,
     }
+
+
+@router.get("/jobs/{job_id}/requests")
+def list_job_requests(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Backward-compatible endpoint for older frontend builds."""
+    job = _get_job(job_id, db)
+    if not _is_owner(job, current_user):
+        raise HTTPException(status_code=403, detail="Only owner can view job requests")
+
+    requests: list[dict[str, object]] = []
+    if job.access_requested_by is not None and job.access_status in {"requested", "accepted"}:
+        requests.append(
+            {
+                "request_id": f"job-{job.id}-req-{job.access_requested_by}",
+                "requester_user_id": job.access_requested_by,
+                "status": job.access_status,
+                "cpu_model": job.cpu_model,
+                "gpu_model": job.gpu_model,
+                "gpu_vram_mb": job.gpu_vram_mb,
+                "ram_mb": job.memory_total_mb,
+                "total_score": job.machine_score,
+                "hardware_metadata": {
+                    "cpu_model": job.cpu_model,
+                    "gpu_model": job.gpu_model,
+                    "gpu_vram_mb": job.gpu_vram_mb,
+                    "memory_total_mb": job.memory_total_mb,
+                    "machine_score": job.machine_score,
+                },
+            }
+        )
+    return {"job_id": job.id, "requests": requests}
+
+
+@router.get("/jobs/{job_id}/accepted-hosts")
+def list_accepted_hosts(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Backward-compatible endpoint for older frontend builds."""
+    job = _get_job(job_id, db)
+    if not _is_owner(job, current_user):
+        raise HTTPException(status_code=403, detail="Only owner can view accepted hosts")
+
+    hosts: list[dict[str, object]] = []
+    if job.access_status == "accepted" and job.host_node_id:
+        hosts.append(
+            {
+                "host_node_id": job.host_node_id,
+                "status": job.status,
+                "gpu_model": job.gpu_model,
+                "gpu_vram": job.gpu_vram,
+                "gpu_driver": job.gpu_driver,
+                "cpu_model": job.cpu_model,
+                "memory_total_mb": job.memory_total_mb,
+                "machine_score": job.machine_score,
+            }
+        )
+    return {"job_id": job.id, "accepted_hosts": hosts}
 
 
 # ── Node registration ─────────────────────────────────────────────────────────
