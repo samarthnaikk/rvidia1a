@@ -60,3 +60,4 @@ htmlcov/
 # IDE/editor
 .vscode/
 .idea/
+*/__pycache__/*
