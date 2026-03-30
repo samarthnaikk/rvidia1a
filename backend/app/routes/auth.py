@@ -1,21 +1,29 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.core.database import SessionLocal
+from app.core.database import get_db
+from app.core.security import create_access_token, decode_access_token, hash_password, verify_password
 from app.models.user import User
 from app.schemas.user import SignupRequest, LoginRequest
-from app.core.security import hash_password, verify_password, create_access_token
 
 router = APIRouter()
+bearer_scheme = HTTPBearer()
 
 
-# Dependency to get DB session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+):
+    token = credentials.credentials
+    payload = decode_access_token(token)
+    user_id = payload.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 
 # ✅ SIGNUP
@@ -66,4 +74,13 @@ def login(user: LoginRequest, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer"
+    }
+
+
+@router.get("/me")
+def me(current_user: User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
     }
