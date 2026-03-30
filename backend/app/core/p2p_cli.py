@@ -18,24 +18,56 @@ def _auth_headers(token: str) -> dict[str, str]:
     }
 
 
+def _normalize_api_base(api_base: str) -> str:
+    return api_base.rstrip("/")
+
+
+def _build_api_url(api_base: str, path: str, with_api_prefix: bool = False) -> str:
+    base = _normalize_api_base(api_base)
+    if with_api_prefix and not base.endswith("/api"):
+        base = f"{base}/api"
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"{base}{normalized_path}"
+
+
 def _api_request(method: str, api_base: str, path: str, token: str, payload: dict | None = None) -> dict:
     encoded_body = None
     if payload is not None:
         encoded_body = json.dumps(payload).encode("utf-8")
 
-    req = request.Request(
-        url=f"{api_base}{path}",
-        method=method,
-        headers=_auth_headers(token),
-        data=encoded_body,
-    )
+    def _perform(url: str) -> bytes:
+        req = request.Request(
+            url=url,
+            method=method,
+            headers=_auth_headers(token),
+            data=encoded_body,
+        )
+        with request.urlopen(req, timeout=30) as response:
+            return response.read()
+
+    primary_url = _build_api_url(api_base, path, with_api_prefix=False)
 
     try:
-        with request.urlopen(req, timeout=30) as response:
-            raw = response.read()
+        raw = _perform(primary_url)
     except error.HTTPError as exc:
-        details = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"API error {exc.code}: {details}") from exc
+        if exc.code == 404:
+            fallback_url = _build_api_url(api_base, path, with_api_prefix=True)
+            if fallback_url != primary_url:
+                try:
+                    raw = _perform(fallback_url)
+                except error.HTTPError as fallback_exc:
+                    details = fallback_exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(f"API error {fallback_exc.code}: {details}") from fallback_exc
+                except error.URLError as fallback_exc:
+                    raise RuntimeError(f"API connection error: {fallback_exc.reason}") from fallback_exc
+            else:
+                details = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"API error {exc.code}: {details}") from exc
+        else:
+            details = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"API error {exc.code}: {details}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"API connection error: {exc.reason}") from exc
 
     if not raw:
         return {}
