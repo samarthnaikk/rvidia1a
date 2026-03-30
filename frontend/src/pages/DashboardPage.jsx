@@ -186,8 +186,8 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-2">
-          <div className="rounded-[12px] border border-emerald-300/25 bg-[#0b1322c9] p-6 shadow-[0_0_32px_rgba(16,185,129,0.12)]">
+        <div className="grid items-start gap-6 lg:grid-cols-2">
+          <div className="self-start rounded-[12px] border border-emerald-300/25 bg-[#0b1322c9] p-6 shadow-[0_0_32px_rgba(16,185,129,0.12)]">
             <p className="text-[10px] uppercase tracking-[3px] text-emerald-300/75">Operational Mode</p>
             <h2 className="mt-3 text-[34px] font-bold uppercase tracking-[1px] text-slate-100">Rent Compute</h2>
             <p className="mt-2 text-[15px] text-slate-400">Submit a GitHub repository and run it on distributed compute resources.</p>
@@ -231,14 +231,14 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
             </div>
           </div>
 
-          <div className="rounded-[12px] border border-white/15 bg-[#0b1322c9] p-6">
+          <div className="flex self-start rounded-[12px] border border-white/15 bg-[#0b1322c9] p-6 lg:h-[740px] lg:flex-col">
             <p className="text-[10px] uppercase tracking-[3px] text-emerald-300/75">Operational Mode</p>
             <h2 className="mt-3 text-[34px] font-bold uppercase tracking-[1px] text-slate-100">Host Compute</h2>
             <p className="mt-2 text-[15px] text-slate-400">Marketplace visibility is controlled by bilateral request/accept.</p>
 
             {hostError && <p className="mt-4 text-[12px] text-red-300">{hostError}</p>}
 
-            <div className="mt-6 space-y-4">
+            <div className="mt-6 space-y-4 lg:max-h-[590px] lg:overflow-y-auto lg:pr-2">
               {marketplaceJobs.map((job) => (
                 <article className="rounded border border-white/15 bg-[#08101d] p-4" key={job.job_id}>
                   <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Open Job</p>
