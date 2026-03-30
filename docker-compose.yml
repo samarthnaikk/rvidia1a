@@ -1,0 +1,31 @@
+services:
+  backend:
+    build: ./backend
+    depends_on:
+      - postgres
+
+  frontend:
+    build: ./frontend
+
+  nginx:
+    build: ./nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - backend
+    profiles: ["prod"]
+
+  postgres:
+    build: ./postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
