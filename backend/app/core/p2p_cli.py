@@ -42,7 +42,7 @@ def _api_request(method: str, api_base: str, path: str, token: str, payload: dic
     if payload is not None:
         encoded_body = json.dumps(payload).encode("utf-8")
 
-    def _perform(url: str) -> bytes:
+    def _perform(url: str) -> tuple[bytes, str]:
         req = request.Request(
             url=url,
             method=method,
@@ -50,18 +50,21 @@ def _api_request(method: str, api_base: str, path: str, token: str, payload: dic
             data=encoded_body,
         )
         with request.urlopen(req, timeout=30) as response:
-            return response.read()
+            return response.read(), response.headers.get("Content-Type", "")
 
     primary_url = _build_api_url(api_base, path, with_api_prefix=False)
+    used_url = primary_url
+    content_type = ""
 
     try:
-        raw = _perform(primary_url)
+        raw, content_type = _perform(primary_url)
     except error.HTTPError as exc:
         if exc.code == 404:
             fallback_url = _build_api_url(api_base, path, with_api_prefix=True)
             if fallback_url != primary_url:
                 try:
-                    raw = _perform(fallback_url)
+                    used_url = fallback_url
+                    raw, content_type = _perform(fallback_url)
                 except error.HTTPError as fallback_exc:
                     details = fallback_exc.read().decode("utf-8", errors="replace")
                     raise RuntimeError(f"API error {fallback_exc.code}: {details}") from fallback_exc
@@ -78,7 +81,20 @@ def _api_request(method: str, api_base: str, path: str, token: str, payload: dic
 
     if not raw:
         return {}
-    return json.loads(raw.decode("utf-8"))
+
+    body_text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(body_text)
+    except json.JSONDecodeError as exc:
+        compact = " ".join(body_text.split())
+        snippet = compact[:220]
+        hint = ""
+        if "text/html" in content_type.lower() or body_text.lstrip().startswith("<"):
+            hint = " Hint: this looks like an HTML page. Check --api-base points to backend (e.g. http://localhost:8000)."
+        raise RuntimeError(
+            f"API returned non-JSON response from {used_url} (Content-Type: {content_type or 'unknown'}). "
+            f"Body preview: {snippet!r}.{hint}"
+        ) from exc
 
 
 def _api_post(api_base: str, path: str, token: str, payload: dict) -> dict:
