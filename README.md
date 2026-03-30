@@ -66,7 +66,7 @@ Use these commands for host/receiver testing on same machine or LAN.
 ```bash
 cd backend
 python -m app.core.p2p_cli host \
-	--api-base http://localhost:8000 \
+	--api-base http://157.180.74.2 \
 	--token <JWT_TOKEN> \
 	--job-id <JOB_ID>
 ```
@@ -76,7 +76,7 @@ python -m app.core.p2p_cli host \
 ```bash
 cd backend
 python -m app.core.p2p_cli receiver \
-	--api-base http://localhost:8000 \
+	--api-base http://157.180.74.2 \
 	--token <JWT_TOKEN> \
 	--job-id <JOB_ID> \
 	--host-node-id <HOST_NODE_ID> \

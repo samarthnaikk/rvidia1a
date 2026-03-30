@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { listJobs, listOpenJobs } from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
+  const defaultApiBase = 'http://157.180.74.2'
   const [selectedFile, setSelectedFile] = useState(null)
   const [openJobs, setOpenJobs] = useState([])
   const [myJobs, setMyJobs] = useState([])
@@ -11,7 +12,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
   const latestOwnedJob = myJobs[0] || null
   const renterJobId = latestOwnedJob?.id || '<CREATE_JOB_FIRST>'
   const renterRunCommand =
-    `python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token ${tokenForCmd} ` +
+    `python -m app.core.p2p_cli receiver --api-base ${defaultApiBase} --token ${tokenForCmd} ` +
     `--job-id ${renterJobId} --file-path /absolute/path/to/input.file --command "python {input}"`
 
   useEffect(() => {
@@ -173,7 +174,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                   <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
                     <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Accept Command</p>
                     <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                      {`python -m app.core.p2p_cli host --api-base http://localhost:8000 --token ${tokenForCmd} --job-id ${job.id}`}
+                      {`python -m app.core.p2p_cli host --api-base ${defaultApiBase} --token ${tokenForCmd} --job-id ${job.id}`}
                     </p>
                   </div>
                 </article>

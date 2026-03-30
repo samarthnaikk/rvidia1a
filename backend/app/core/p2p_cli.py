@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -9,6 +10,9 @@ from urllib import error, request
 import iroh
 
 from app.core.rvidia_core import RvidiaNode, WorkspaceManager
+
+
+DEFAULT_API_BASE = "http://157.180.74.2"
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -377,6 +381,13 @@ async def run_host(args):
     workspace_dir.mkdir(parents=True, exist_ok=True)
     received_file = await _download_ticket_to_path(node, input_ticket, workspace_dir / input_filename)
 
+    preexisting_files = {
+        file_path.resolve()
+        for file_path in workspace_dir.rglob("*")
+        if file_path.is_file()
+    }
+    execution_started_at = time.time()
+
     command = command_template.replace("{input}", received_file.name)
     print(f"Executing command for task {args.job_id}: {command}")
     proc, log_source, captured_lines = await _run_command_with_logs(command, workspace_dir)
@@ -393,11 +404,27 @@ async def run_host(args):
             f"Exit code: {return_code}",
         ]
 
-    artifact = workspace_dir / "artifact.txt"
-    artifact.write_text("\n".join(output_lines), encoding="utf-8")
-
     logs_file = workspace_dir / "execution.log"
     logs_file.write_text("\n".join(output_lines), encoding="utf-8")
+
+    artifact: Path | None = None
+    generated_artifacts: list[Path] = []
+    for file_path in workspace_dir.rglob("*"):
+        if not file_path.is_file():
+            continue
+        resolved = file_path.resolve()
+        if resolved == received_file.resolve() or resolved == logs_file.resolve():
+            continue
+        if resolved in preexisting_files and file_path.stat().st_mtime < execution_started_at:
+            continue
+        generated_artifacts.append(file_path)
+
+    if generated_artifacts:
+        generated_artifacts.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+        artifact = generated_artifacts[0]
+    else:
+        artifact = workspace_dir / "artifact.txt"
+        artifact.write_text("\n".join(output_lines), encoding="utf-8")
 
     artifact_ticket = await _share_file_ticket(node, artifact)
     logs_ticket = await _share_file_ticket(node, logs_file)
@@ -529,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--api-base", default="http://localhost:8000", help="Backend API base URL")
+    common.add_argument("--api-base", default=DEFAULT_API_BASE, help="Backend API base URL")
     common.add_argument("--token", required=True, help="Auth bearer token")
     common.add_argument("--job-id", required=True, help="Job ID from backend")
     common.add_argument("--workspace", default="./.p2p-workspaces", help="Local workspace root")
