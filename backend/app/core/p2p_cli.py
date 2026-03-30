@@ -2,8 +2,13 @@ import argparse
 import asyncio
 import inspect
 import json
+import platform
+import shlex
+import shutil
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -180,6 +185,32 @@ def _detect_gpu() -> dict[str, str | None]:
     return {"gpu_model": None, "gpu_vram": None, "gpu_driver": None}
 
 
+def _is_gpu_runtime_unavailable(stderr_or_logs: str) -> bool:
+    """Return True when output signals that a Docker GPU runtime is absent."""
+    lowered = stderr_or_logs.lower()
+    signals = [
+        "could not select device driver",
+        "capabilities: [[gpu]]",
+        "nvidia-container-cli: initialization error",
+        "wsl environment detected but no adapters were found",
+        "no cuda-capable device",
+        "unknown runtime specified nvidia",
+        "could not load nvml",
+    ]
+    return any(s in lowered for s in signals)
+
+
+def _is_wsl() -> bool:
+    """Return True when running inside Windows Subsystem for Linux."""
+    if platform.system() != "Linux":
+        return False
+    try:
+        proc_version = Path("/proc/version").read_text(errors="replace").lower()
+        return "microsoft" in proc_version or "wsl" in proc_version
+    except OSError:
+        return False
+
+
 # ── Docker helpers ────────────────────────────────────────────────────────────
 
 async def _run_command_with_logs(command: str, cwd: Path):
@@ -254,6 +285,7 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
     # Ensure destination directory exists and use absolute path (fixes IrohError).
     abs_output_path = Path(output_path).resolve()
     abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[RVIDIA] Writing artifact to: {abs_output_path}")
 
     if abs_output_path.exists():
         abs_output_path.unlink()
@@ -262,32 +294,46 @@ async def _download_ticket_to_path(node: RvidiaNode, ticket_str: str, output_pat
         await blobs.write_to_path(ticket.hash(), str(abs_output_path))
         return abs_output_path
     except Exception as primary_error:
-        # Log directory permissions to stderr to aid debugging IrohError.
-        parent = abs_output_path.parent
+        # Log detailed diagnostics to aid debugging IrohError.
         import stat as _stat
+        parent = abs_output_path.parent
         try:
             mode = oct(_stat.S_IMODE(parent.stat().st_mode))
         except Exception:
             mode = "unknown"
         print(
             f"[RVIDIA] IrohError writing to '{abs_output_path}'. "
-            f"Parent dir '{parent}' permissions: {mode}",
+            f"Parent dir '{parent}' permissions: {mode}. "
+            f"Platform: {platform.system()}. WSL: {_is_wsl()}.",
             file=sys.stderr,
         )
 
-        fallback_path = abs_output_path.with_name(
-            f"{abs_output_path.stem}-{int(time.time())}{abs_output_path.suffix}"
-        )
-        if fallback_path.exists():
-            fallback_path.unlink()
+        # Strategy 2: write to a Linux-native temp dir, then copy to requested destination.
+        # This avoids iroh FFI failures on /mnt/c/... paths in WSL.
+        tmp_dir = Path(tempfile.gettempdir()) / "rvidia-iroh" / str(uuid.uuid4())
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / (abs_output_path.name or "artifact.bin")
+
         try:
-            await blobs.write_to_path(ticket.hash(), str(fallback_path))
-            return fallback_path
-        except Exception as fallback_error:
+            await blobs.write_to_path(ticket.hash(), str(tmp_path))
+        except Exception as tmp_error:
             raise RuntimeError(
-                f"Failed to write downloaded ticket to '{abs_output_path}' or fallback '{fallback_path}': "
-                f"{primary_error} | {fallback_error}"
-            ) from fallback_error
+                f"Failed to write downloaded ticket to '{abs_output_path}' (primary) "
+                f"and to temp path '{tmp_path}': {primary_error} | {tmp_error}"
+            ) from tmp_error
+
+        # Copy from temp to the requested destination.
+        abs_output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(tmp_path), str(abs_output_path))
+            print(f"[RVIDIA] Artifact copied from temp '{tmp_path}' to '{abs_output_path}'.")
+            return abs_output_path
+        except Exception as copy_error:
+            # Keep the temp artifact so the user can recover it manually.
+            raise RuntimeError(
+                f"Wrote artifact to temp path '{tmp_path}' but could not copy to "
+                f"'{abs_output_path}': {copy_error}. Recover manually from temp path."
+            ) from copy_error
 
 
 # ── Signaling ─────────────────────────────────────────────────────────────────
@@ -360,11 +406,10 @@ async def _host_execute_docker(
     # 1. Clone the repository.
     repo_dir = workspace_dir / "repo"
     if repo_dir.exists():
-        import shutil
         shutil.rmtree(repo_dir)
 
-    clone_cmd = f"git clone --depth=1 --branch {branch} {repo_url} repo"
     print(f"[RVIDIA] Cloning {repo_url} (branch: {branch})...")
+    clone_cmd = f"git clone --depth=1 --branch {branch} {repo_url} repo"
     clone_proc, clone_logs, clone_captured = await _run_command_with_logs(clone_cmd, workspace_dir)
     async for line in clone_logs:
         print(f"[git] {line}")
@@ -386,38 +431,70 @@ async def _host_execute_docker(
 
     # 3. Docker run — GPU pass-through, /outputs volume, extra docker_args.
     abs_outputs = str(outputs_dir.resolve())
-    extra = docker_args.strip() if docker_args else ""
-    def _build_run_cmd(use_gpu: bool) -> str:
-        gpu_segment = "--gpus all " if use_gpu else ""
-        return (
-            f"docker run --rm {gpu_segment}"
-            f"-v {abs_outputs}:/outputs "
-            f"{extra} "
-            f"{image_tag}"
-        ).strip()
+
+    # Parse extra docker args safely to avoid quoting issues on Windows paths.
+    extra_args: list[str] = []
+    if docker_args and docker_args.strip():
+        try:
+            extra_args = shlex.split(docker_args, posix=False)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Failed to parse --docker-args {docker_args!r}: {exc}. "
+                "Hint: check quoting and special characters."
+            ) from exc
+
+    def _build_run_args(use_gpu: bool) -> list[str]:
+        cmd = ["docker", "run", "--rm"]
+        if use_gpu:
+            cmd += ["--gpus", "all"]
+        cmd += ["-v", f"{abs_outputs}:/outputs"]
+        cmd += extra_args
+        cmd.append(image_tag)
+        return cmd
 
     print(f"[RVIDIA] Running container '{image_tag}'...")
+    print(f"[RVIDIA] GPU requested: True")
     run_rc = 1
     run_captured: list[str] = []
+    execution_mode = "GPU"
 
     # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
-    gpu_first = _build_run_cmd(use_gpu=True)
-    run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
+    gpu_args = _build_run_args(use_gpu=True)
+    run_proc, run_logs, run_captured = await _run_command_with_logs(
+        " ".join(gpu_args), workspace_dir
+    )
     async for line in run_logs:
         print(f"[docker run] {line}")
     run_rc = await run_proc.wait()
 
     if run_rc != 0:
-        combined = "\n".join(run_captured).lower()
-        gpu_unavailable = "could not select device driver" in combined or "capabilities: [[gpu]]" in combined
-        if gpu_unavailable:
-            print("[RVIDIA] Docker GPU runtime unavailable; retrying container without GPU flags.")
-            cpu_fallback = _build_run_cmd(use_gpu=False)
-            cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(cpu_fallback, workspace_dir)
+        combined = "\n".join(run_captured)
+        if _is_gpu_runtime_unavailable(combined):
+            matched = next(
+                (s for s in [
+                    "could not select device driver", "capabilities: [[gpu]]",
+                    "nvidia-container-cli: initialization error",
+                    "wsl environment detected but no adapters were found",
+                    "no cuda-capable device", "unknown runtime specified nvidia",
+                    "could not load nvml",
+                ] if s in combined.lower()),
+                "gpu-unavailable signal",
+            )
+            print(
+                f"[RVIDIA] GPU runtime unavailable on this host; retrying without --gpus all "
+                f"(matched: '{matched}')"
+            )
+            cpu_args = _build_run_args(use_gpu=False)
+            cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(
+                " ".join(cpu_args), workspace_dir
+            )
             async for line in cpu_logs:
                 print(f"[docker run] {line}")
             run_rc = await cpu_proc.wait()
             run_captured.extend(["", "[CPU FALLBACK]"] + cpu_captured)
+            execution_mode = "CPU fallback"
+
+    print(f"[RVIDIA] Execution mode: {execution_mode}")
 
     # 4. Write execution log.
     logs_file = workspace_dir / "execution.log"
@@ -651,7 +728,7 @@ async def run_receiver(args):
     logs_ticket = str(result.get("logs_ticket") or "")
     success = bool(result.get("success"))
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Download all artifact files.
