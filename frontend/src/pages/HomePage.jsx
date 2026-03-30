@@ -1,31 +1,80 @@
-import HeroMetrics from '../components/HeroMetrics'
+import { AnimatePresence, motion } from 'framer-motion'
+import { useEffect, useState } from 'react'
 import Navbar from '../components/Navbar'
+import atmosphereGlow from '../assets/imagee.png'
 
 function HomePage({ onLoginClick, onStartComputingClick }) {
+  const rotatingWords = ['Compute', 'GPUs', 'Training', 'Workload']
+  const [wordIndex, setWordIndex] = useState(0)
+
+  useEffect(() => {
+    let rotationInterval
+
+    const startDelayTimeout = setTimeout(() => {
+      setWordIndex((currentIndex) => (currentIndex + 1) % rotatingWords.length)
+
+      rotationInterval = setInterval(() => {
+        setWordIndex((currentIndex) => (currentIndex + 1) % rotatingWords.length)
+      }, 2200)
+    }, 600)
+
+    return () => {
+      clearTimeout(startDelayTimeout)
+      if (rotationInterval) {
+        clearInterval(rotationInterval)
+      }
+    }
+  }, [rotatingWords.length])
+
   return (
-    <div className="relative mx-auto max-w-[1280px]">
+    <div
+      className="relative min-h-screen w-full overflow-hidden"
+      style={{ background: 'linear-gradient(48.58deg, #B9D0BF 13.87%, #080808 48.2%, #A9BCB8 82.53%)' }}
+    >
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/2 h-[780px] w-[780px] -translate-x-1/2 -translate-y-1/2 bg-center bg-no-repeat opacity-55 mix-blend-screen blur-[36px]"
+        style={{ backgroundImage: `url(${atmosphereGlow})`, backgroundSize: 'contain' }}
+      />
+
       <Navbar onLoginClick={onLoginClick} />
 
-      <section className="mx-auto px-6 pb-10 pt-10 md:px-10">
+      <section className="mx-auto mt-8 px-6 pb-10 pt-10 md:px-10">
         <div className="mx-auto max-w-[1120px] text-center">
-          <div className="mb-5 inline-flex rounded-full border border-emerald-300/30 bg-emerald-400/10 px-4 py-1 text-[11px] uppercase tracking-[3px] text-emerald-300">
-            MAINNET BETA LIVE
-          </div>
+          <h1 className="align-middle font-space text-center text-[64px] font-bold leading-[96px] tracking-[4.8px] text-[#d1d5db]">
+            Power the Future of AI <br />
+            With
+            <br />
+            <span className="mt-11 inline-flex items-baseline whitespace-nowrap text-[#0EFE95] text-[96px]">
+              Decentralized
+              <span className="ml-5 inline-flex min-w-[8.5ch] items-baseline justify-start align-baseline leading-[1]">
+                <AnimatePresence mode="wait">
+                  <motion.span
+                    key={rotatingWords[wordIndex]}
+                    className="inline-block align-baseline leading-[1]"
+                    initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -20, scale: 0.98 }}
+                    transition={{
+                      type: 'spring',
+                      mass: 1,
+                      stiffness: 177.8,
+                      damping: 20,
+                    }}
+                  >
+                    {rotatingWords[wordIndex]}
+                  </motion.span>
+                </AnimatePresence>
+              </span>
+            </span>
+          </h1>
 
-          <div className="border border-[#6f82b9] bg-[#ffffff14] px-4 py-5 md:px-10 md:py-6">
-            <h1 className="font-space text-[58px] font-bold leading-[1.04] tracking-[1px] text-[#d1d5db] md:text-[72px]">
-              Power the Future of AI with{' '}
-              <span className="text-emerald-400">Decentralized Compute.</span>
-            </h1>
-          </div>
-
-          <p className="mx-auto mt-6 max-w-[760px] text-[31.99px] leading-[1.5] tracking-[0.1px] text-slate-300/90 md:text-[27px]">
+      <p className="mx-auto mt-32 max-w-[760px] text-center font-['Manrope'] text-[20px] font-normal text-[#B9CBBB] leading-[28px] tracking-[0px] text-slate-300/90 align-middle">
             Access high-performance GPUs and idle compute cycles at a fraction of centralized cost. Secure, scalable, and fully sovereign.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
             <button
-              className="h-[52px] min-w-[210px] border border-emerald-400 bg-emerald-400 px-7 text-[12px] font-bold uppercase tracking-[3px] text-slate-900 transition hover:brightness-110"
+              className="h-[52px] min-w-[210px] border border-emerald-400 bg-[#0EFE95] px-7 text-[12px] font-bold uppercase tracking-[3px] text-slate-900 transition hover:brightness-110"
               onClick={onStartComputingClick}
               type="button"
             >
@@ -37,19 +86,6 @@ function HomePage({ onLoginClick, onStartComputingClick }) {
             >
               Contribute Resources
             </button>
-          </div>
-
-          <div className="mt-14 overflow-hidden border border-white/10 bg-[#99aaa31a] p-4 backdrop-blur-[1px]">
-            <div className="relative h-[295px] w-full rounded-sm border border-white/5 bg-[radial-gradient(circle_at_8%_40%,rgba(225,245,235,0.68),transparent_46%),radial-gradient(circle_at_65%_56%,rgba(14,91,99,0.36),transparent_42%),linear-gradient(114deg,#b9c9bf_0%,#2a3940_30%,#06131e_58%,#0f2630_100%)]">
-              <div className="absolute inset-0 opacity-40 [background-image:radial-gradient(circle_at_20%_65%,rgba(188,232,223,0.55),transparent_40%),repeating-radial-gradient(circle_at_60%_65%,rgba(81,201,191,0.18)_0,rgba(81,201,191,0.08)_2px,transparent_6px)]" />
-
-              <HeroMetrics />
-
-              <div className="absolute bottom-4 right-4 text-right">
-                <p className="text-[8px] uppercase tracking-[2px] text-slate-400">Resource Distribution</p>
-                <p className="text-[33.99px] font-bold leading-none text-emerald-400">▮▮▮▮</p>
-              </div>
-            </div>
           </div>
         </div>
       </section>
