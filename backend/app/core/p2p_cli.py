@@ -409,7 +409,15 @@ async def _host_execute_docker(
 
     if run_rc != 0:
         combined = "\n".join(run_captured).lower()
-        gpu_unavailable = "could not select device driver" in combined or "capabilities: [[gpu]]" in combined
+        gpu_error_markers = [
+            "could not select device driver",
+            "capabilities: [[gpu]]",
+            "nvidia-container-cli",
+            "wsl environment detected but no adapters were found",
+            "error running prestart hook",
+            "failed to create shim task",
+        ]
+        gpu_unavailable = any(marker in combined for marker in gpu_error_markers)
         if gpu_unavailable:
             print("[RVIDIA] Docker GPU runtime unavailable; retrying container without GPU flags.")
             cpu_fallback = _build_run_cmd(use_gpu=False)
