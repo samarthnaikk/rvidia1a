@@ -26,7 +26,7 @@ def get_current_user(
     return user
 
 
-# ✅ SIGNUP
+# SIGNUP
 @router.post("/signup")
 def signup(user: SignupRequest, db: Session = Depends(get_db)):
 
@@ -54,7 +54,7 @@ def signup(user: SignupRequest, db: Session = Depends(get_db)):
     return {"message": "User created successfully"}
 
 
-# ✅ LOGIN
+# LOGIN
 @router.post("/login")
 def login(user: LoginRequest, db: Session = Depends(get_db)):
 
