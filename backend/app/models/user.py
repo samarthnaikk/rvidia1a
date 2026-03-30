@@ -11,5 +11,3 @@ class User(Base):
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
-    google_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    auth_provider: Mapped[str] = mapped_column(String, default="email")
