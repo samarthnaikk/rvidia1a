@@ -4,7 +4,7 @@ services:
     restart: always
     depends_on:
       - postgres
-    profiles: ["dev"]
+    profiles: ["dev","prod"]
     ports:
       - "8000:8000"
     environment:
@@ -15,7 +15,7 @@ services:
 
   frontend:
     build: ./frontend
-    profiles: ["dev"]
+    profiles: ["dev","prod"]
     ports:
       - "3000:3000"
 
@@ -30,7 +30,7 @@ services:
 
   postgres:
     build: ./postgres
-    profiles: ["dev"]
+    profiles: ["dev","prod"]
     ports:
       - "5432:5432"
     environment:
