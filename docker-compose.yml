@@ -6,6 +6,8 @@ services:
 
   frontend:
     build: ./frontend
+    ports:
+      - "3000:3000"
 
   nginx:
     build: ./nginx
