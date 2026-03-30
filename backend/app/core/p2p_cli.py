@@ -207,6 +207,35 @@ def _resolve_requested_job_id(api_base: str, token: str, requested_job_id: str) 
     return job_id
 
 
+def _job_not_found_hint(api_base: str, token: str, requested_job_id: str) -> str:
+    try:
+        jobs = _list_marketplace_jobs(api_base, token)
+    except Exception as exc:
+        return (
+            f"Job '{requested_job_id}' was not found and marketplace lookup failed: {exc}. "
+            "Retry with --job-id latest."
+        )
+
+    ids: list[str] = []
+    for job in jobs:
+        value = str(job.get("job_id") or "").strip()
+        if value:
+            ids.append(value)
+
+    if not ids:
+        return (
+            f"Job '{requested_job_id}' was not found and no marketplace jobs are visible for this token/backend. "
+            "Create/accept a job first, then retry."
+        )
+
+    preview = ", ".join(ids[:5])
+    return (
+        f"Job '{requested_job_id}' was not found on {api_base}. "
+        f"Visible job_id values (first {min(len(ids), 5)}): {preview}. "
+        "Use one of these IDs or pass --job-id latest."
+    )
+
+
 async def _wait_for_access_accepted(api_base: str, token: str, job_id: str) -> None:
     while True:
         state = _get_access_state(api_base, token, job_id)
@@ -1069,10 +1098,7 @@ async def run_host(args):
                 file=sys.stderr,
             )
         elif "API error 404" in details:
-            raise RuntimeError(
-                f"Job '{args.job_id}' was not found on {args.api_base}. "
-                "Use the exact job_id from the frontend, or pass --job-id latest/auto intentionally."
-            ) from exc
+            raise RuntimeError(_job_not_found_hint(args.api_base, args.token, args.job_id)) from exc
         else:
             raise
 
@@ -1334,10 +1360,7 @@ async def _run_receiver_common(args, send_input_ticket: bool) -> None:
         _get_access_state(args.api_base, args.token, args.job_id)
     except RuntimeError as exc:
         if "API error 404" in str(exc):
-            raise RuntimeError(
-                f"Job '{args.job_id}' was not found on {args.api_base}. "
-                "Use the exact job_id from the frontend, or pass --job-id latest/auto intentionally."
-            ) from exc
+            raise RuntimeError(_job_not_found_hint(args.api_base, args.token, args.job_id)) from exc
         raise
 
     resolved_workspace = _resolve_workspace_root(args.workspace)
