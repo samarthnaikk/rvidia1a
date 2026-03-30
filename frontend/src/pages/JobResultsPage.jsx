@@ -65,7 +65,8 @@ function JobResultsPage({ authToken, onBackDashboard, highlightedJobId }) {
               <p className="text-[11px] uppercase tracking-[2px] text-slate-400">Job ID</p>
               <p className="mb-3 break-all font-jetbrains text-[13px] text-slate-100">{job.id}</p>
 
-              <p className="text-[12px] text-slate-300">File: {job.filename}</p>
+              <p className="text-[12px] text-slate-300">Repo: {job.repo_url || 'Not provided'}</p>
+              <p className="text-[12px] text-slate-300">Branch: {job.branch || 'main'}</p>
               <p className="text-[12px] text-slate-300">Command: {job.command}</p>
               <p className="text-[12px] text-slate-300">Server Status: {job.status}</p>
               <p className="text-[12px] text-slate-300">Artifact: {job.artifact_path || 'Not yet available'}</p>

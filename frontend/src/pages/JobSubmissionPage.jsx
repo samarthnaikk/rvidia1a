@@ -2,7 +2,6 @@ import { useState } from "react";
 import { createJob, registerHost } from "../lib/api";
 
 function JobSubmissionPage({ authToken, onBackDashboard, onJobCreated }) {
-  const [selectedFile, setSelectedFile] = useState(null);
   const [repoUrl, setRepoUrl] = useState("");
   const [branch, setBranch] = useState("main");
   const [command, setCommand] = useState("python main.py");
@@ -25,8 +24,7 @@ function JobSubmissionPage({ authToken, onBackDashboard, onJobCreated }) {
       const job = await createJob(authToken, {
         repo_url: repoUrl.trim(),
         branch: branch.trim() || "main",
-        filename: selectedFile?.name || "",
-        command,
+        command: command.trim(),
       });
 
       if (hostNodeId.trim()) {
@@ -86,25 +84,7 @@ function JobSubmissionPage({ authToken, onBackDashboard, onJobCreated }) {
 
         <div className="mb-6">
           <label className="mb-2 block text-[11px] uppercase tracking-[2px] text-slate-400">
-            Input File
-          </label>
-          <input
-            className="w-full rounded border border-white/20 bg-[#09101d] p-3 text-slate-100"
-            onChange={(event) =>
-              setSelectedFile(event.target.files?.[0] ?? null)
-            }
-            type="file"
-          />
-          <p className="mt-2 text-[12px] text-slate-400">
-            {selectedFile
-              ? `Selected: ${selectedFile.name}`
-              : "No file selected (optional)."}
-          </p>
-        </div>
-
-        <div className="mb-6">
-          <label className="mb-2 block text-[11px] uppercase tracking-[2px] text-slate-400">
-            Execution Command
+            Execution Command (inside repo)
           </label>
           <input
             className="w-full rounded border border-white/20 bg-[#09101d] p-3 text-slate-100"

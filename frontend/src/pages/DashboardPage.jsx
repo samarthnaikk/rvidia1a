@@ -3,7 +3,6 @@ import { listJobs, listOpenJobs } from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const defaultApiBase = 'http://157.180.74.2'
-  const [selectedFile, setSelectedFile] = useState(null)
   const [openJobs, setOpenJobs] = useState([])
   const [myJobs, setMyJobs] = useState([])
   const [hostError, setHostError] = useState('')
@@ -11,9 +10,11 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
   const tokenForCmd = authToken || 'MISSING_TOKEN'
   const latestOwnedJob = myJobs[0] || null
   const renterJobId = latestOwnedJob?.id || '<CREATE_JOB_FIRST>'
+  const renterRepoUrl = latestOwnedJob?.repo_url || '<REPO_URL>'
+  const renterBranch = latestOwnedJob?.branch || 'main'
   const renterRunCommand =
     `python -m app.core.p2p_cli receiver --api-base ${defaultApiBase} --token ${tokenForCmd} ` +
-    `--job-id ${renterJobId} --file-path /absolute/path/to/input.file --command "python {input}"`
+    `--job-id ${renterJobId} --repo-url "${renterRepoUrl}" --branch "${renterBranch}"`
 
   useEffect(() => {
     let active = true
@@ -103,19 +104,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
           <div className="rounded-[12px] border border-emerald-300/25 bg-[#0b1322c9] p-6 shadow-[0_0_32px_rgba(16,185,129,0.12)]">
             <p className="text-[10px] uppercase tracking-[3px] text-emerald-300/75">Operational Mode</p>
             <h2 className="mt-3 text-[34px] font-bold uppercase tracking-[1px] text-slate-100">Rent Compute</h2>
-            <p className="mt-2 text-[15px] text-slate-400">Upload your task file to rent distributed compute resources.</p>
-
-            <label className="mt-7 block rounded-[10px] border border-dashed border-emerald-300/45 bg-[#0d1729] px-5 py-10 text-center">
-              <span className="block text-[12px] uppercase tracking-[3px] text-slate-400">Drop file here or click to upload</span>
-              <span className="mt-3 block text-[13px] text-emerald-200/90">
-                {selectedFile ? selectedFile.name : 'No file selected'}
-              </span>
-              <input
-                className="hidden"
-                onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-                type="file"
-              />
-            </label>
+            <p className="mt-2 text-[15px] text-slate-400">Submit a GitHub repository and run it on distributed compute resources.</p>
 
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <button
@@ -167,7 +156,8 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                   <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Open Job</p>
                   <p className="font-jetbrains mt-1 break-all text-[12px] text-slate-200">{job.id}</p>
                   <p className="mt-2 text-[12px] text-slate-300">Owner: user #{job.user_id}</p>
-                  <p className="text-[12px] text-slate-300">File: {job.filename}</p>
+                  <p className="text-[12px] text-slate-300">Repo: {job.repo_url || 'Not provided'}</p>
+                  <p className="text-[12px] text-slate-300">Branch: {job.branch || 'main'}</p>
                   <p className="text-[12px] text-slate-300">Command: {job.command}</p>
                   <p className="text-[12px] text-emerald-200">Status: {job.status}</p>
 
