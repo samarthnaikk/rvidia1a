@@ -1,4 +1,5 @@
 import argparse
+import getpass
 import json
 import os
 import subprocess
@@ -257,6 +258,151 @@ def cmd_p2p_receiver(args: argparse.Namespace) -> None:
     _run_p2p_subcommand(args, "receiver")
 
 
+def _prompt(label: str, default: str | None = None, secret: bool = False, required: bool = False) -> str:
+    while True:
+        prompt_label = label
+        if default is not None and default != "":
+            prompt_label += f" [{default}]"
+        prompt_label += ": "
+
+        value = getpass.getpass(prompt_label) if secret else input(prompt_label)
+        value = value.strip()
+
+        if value:
+            return value
+        if default is not None:
+            return default
+        if not required:
+            return ""
+        print("Value is required.")
+
+
+def cmd_tui(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    print("RVIDIA CLI TUI")
+    print(f"Using API base: {api_base}")
+
+    while True:
+        print("\nSelect an action:")
+        print(" 1) Login")
+        print(" 2) Signup")
+        print(" 3) Whoami")
+        print(" 4) Create Job")
+        print(" 5) List My Jobs")
+        print(" 6) List Marketplace Jobs")
+        print(" 7) Request Access")
+        print(" 8) Accept Access")
+        print(" 9) Show Access State")
+        print("10) Run P2P Host")
+        print("11) Run P2P Receiver")
+        print("12) Logout")
+        print(" 0) Exit")
+
+        choice = _prompt("Choice", required=True)
+
+        try:
+            if choice == "1":
+                username_or_email = _prompt("Username or email", required=True)
+                password = _prompt("Password", secret=True, required=True)
+                cmd_login(
+                    argparse.Namespace(
+                        api_base=api_base,
+                        username_or_email=username_or_email,
+                        password=password,
+                    )
+                )
+            elif choice == "2":
+                username = _prompt("Username", required=True)
+                email = _prompt("Email", required=True)
+                password = _prompt("Password", secret=True, required=True)
+                confirm_password = _prompt("Confirm password", secret=True, required=True)
+                cmd_signup(
+                    argparse.Namespace(
+                        api_base=api_base,
+                        username=username,
+                        email=email,
+                        password=password,
+                        confirm_password=confirm_password,
+                    )
+                )
+            elif choice == "3":
+                cmd_whoami(argparse.Namespace(api_base=api_base, token=None))
+            elif choice == "4":
+                repo_url = _prompt("Repo URL", required=True)
+                branch = _prompt("Branch", default="main")
+                command = _prompt("Command (optional)", default="")
+                cmd_create_job(
+                    argparse.Namespace(
+                        api_base=api_base,
+                        token=None,
+                        repo_url=repo_url,
+                        branch=branch,
+                        command=command,
+                    )
+                )
+            elif choice == "5":
+                open_only = _prompt("Open jobs only? (y/N)", default="n").lower() in {"y", "yes"}
+                cmd_list_jobs(argparse.Namespace(api_base=api_base, token=None, open=open_only))
+            elif choice == "6":
+                cmd_list_marketplace(argparse.Namespace(api_base=api_base, token=None))
+            elif choice == "7":
+                job_id = _prompt("Job ID", required=True)
+                cmd_request_access(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
+            elif choice == "8":
+                job_id = _prompt("Job ID", required=True)
+                cmd_accept_access(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
+            elif choice == "9":
+                job_id = _prompt("Job ID", required=True)
+                cmd_access_state(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
+            elif choice == "10":
+                job_id = _prompt("Job ID", required=True)
+                workspace = _prompt("Workspace", default="./.p2p-workspaces")
+                no_request_access = _prompt("Disable auto request-access? (y/N)", default="n").lower() in {"y", "yes"}
+                secret_key = _prompt("Secret key (optional)", default="")
+                cmd_p2p_host(
+                    argparse.Namespace(
+                        api_base=api_base,
+                        token=None,
+                        job_id=job_id,
+                        workspace=workspace,
+                        no_request_access=no_request_access,
+                        secret_key=secret_key or None,
+                    )
+                )
+            elif choice == "11":
+                job_id = _prompt("Job ID", required=True)
+                repo_url = _prompt("Repo URL", required=True)
+                branch = _prompt("Branch", default="main")
+                docker_args = _prompt("Docker args (optional)", default="")
+                host_node_id = _prompt("Host node ID (optional)", default="")
+                output_dir = _prompt("Output directory", default="./outputs")
+                workspace = _prompt("Workspace", default="./.p2p-workspaces")
+                secret_key = _prompt("Secret key (optional)", default="")
+                cmd_p2p_receiver(
+                    argparse.Namespace(
+                        api_base=api_base,
+                        token=None,
+                        job_id=job_id,
+                        repo_url=repo_url,
+                        branch=branch,
+                        docker_args=docker_args,
+                        host_node_id=host_node_id,
+                        output_dir=output_dir,
+                        workspace=workspace,
+                        secret_key=secret_key or None,
+                    )
+                )
+            elif choice == "12":
+                cmd_logout(argparse.Namespace())
+            elif choice == "0":
+                print("Exiting TUI.")
+                return
+            else:
+                print("Unknown choice. Please select a number from the menu.")
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"Error: {exc}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RVIDIA CLI client")
     _add_connection_args(parser)
@@ -344,6 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
     p2p_receiver.add_argument("--workspace", default="./.p2p-workspaces")
     p2p_receiver.add_argument("--secret-key", default=None)
     p2p_receiver.set_defaults(handler=cmd_p2p_receiver)
+
+    tui = sub.add_parser("tui", help="Interactive menu mode (no flags required per action)")
+    _add_connection_args(tui)
+    tui.set_defaults(handler=cmd_tui)
 
     return parser
 

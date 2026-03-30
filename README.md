@@ -44,6 +44,12 @@ cd backend
 python -m app.core.client_cli --help
 ```
 
+Interactive mode (menu-driven, minimal typing):
+
+```bash
+python -m app.core.client_cli tui --api-base http://localhost:8000
+```
+
 Login once (session is persisted at `~/.rvidia-cli/session.json`):
 
 ```bash
