@@ -136,10 +136,7 @@ const commandPlaybook = [
     commands: [
       'git clone https://github.com/samarthnaikk/rvidia1a.git',
       'cd rvidia1a',
-      'python -m venv .venv',
-      'source .venv/bin/activate',
-      'pip install -r backend/requirements.txt',
-      'cd backend && python run.py',
+      'docker-compose --profile dev up --build',
     ],
   },
   {
