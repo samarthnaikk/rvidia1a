@@ -5,6 +5,10 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
   const [selectedFile, setSelectedFile] = useState(null)
   const [openJobs, setOpenJobs] = useState([])
   const [hostError, setHostError] = useState('')
+  const tokenForCmd = authToken || 'MISSING_TOKEN'
+  const renterRunCommand =
+    `python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token ${tokenForCmd} ` +
+    '--job-id <JOB_ID> --host-node-id <HOST_NODE_ID> --file-path /absolute/path/to/input.file --command "python {input}"'
 
   useEffect(() => {
     let active = true
@@ -111,7 +115,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
               <div className="rounded border border-white/10 bg-[#060b14] p-3">
                 <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Renter Run Command (After Job Creation)</p>
                 <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                  python -m app.core.p2p_cli receiver --api-base http://localhost:8000 --token {authToken || 'MISSING_TOKEN'} --job-id &lt;JOB_ID&gt; --host-node-id &lt;HOST_NODE_ID&gt; --file-path /absolute/path/to/input.file --command "python {'{input}'}"
+                  {renterRunCommand}
                 </p>
               </div>
             </div>
@@ -137,7 +141,7 @@ function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogou
                   <div className="mt-3 rounded border border-white/10 bg-[#060b14] p-3">
                     <p className="text-[10px] uppercase tracking-[2px] text-slate-500">Host Accept Command</p>
                     <p className="mt-2 break-all font-jetbrains text-[11px] text-emerald-200">
-                      python -m app.core.p2p_cli host --api-base http://localhost:8000 --token {authToken || 'MISSING_TOKEN'} --job-id {job.id}
+                      {`python -m app.core.p2p_cli host --api-base http://localhost:8000 --token ${tokenForCmd} --job-id ${job.id}`}
                     </p>
                   </div>
                 </article>
