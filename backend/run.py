@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.core.database import Base, engine
-from app.models import job, user
+from app.models import job, p2p_signal, user
 from app.routes import auth, jobs, p2p
 
 
@@ -25,8 +25,33 @@ def ensure_jobs_schema() -> None:
             connection.execute(text(statement))
 
 
+def ensure_p2p_signals_schema() -> None:
+    """Bootstrap p2p_signals table for existing DBs that pre-date this model."""
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS p2p_signals (
+            id VARCHAR PRIMARY KEY,
+            job_id VARCHAR NOT NULL,
+            from_node_id VARCHAR NOT NULL,
+            to_node_id VARCHAR NOT NULL,
+            signal_type VARCHAR NOT NULL,
+            payload TEXT NOT NULL,
+            delivered BOOLEAN NOT NULL DEFAULT FALSE,
+            delivered_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_p2p_signals_job_id ON p2p_signals (job_id)",
+        "CREATE INDEX IF NOT EXISTS ix_p2p_signals_to_node_id ON p2p_signals (to_node_id)",
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
 Base.metadata.create_all(bind=engine)
 ensure_jobs_schema()
+ensure_p2p_signals_schema()
 
 app = FastAPI()
 
