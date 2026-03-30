@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -27,11 +27,31 @@ class Job(Base):
     latest_receiver_node_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     artifact_state: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    host_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receiver_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    failover_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_failover_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_phase: Mapped[str | None] = mapped_column(String, nullable=True)
+    checkpoint_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # GPU metadata reported by host on registration
     gpu_model: Mapped[str | None] = mapped_column(String, nullable=True)
     gpu_vram: Mapped[str | None] = mapped_column(String, nullable=True)
     gpu_driver: Mapped[str | None] = mapped_column(String, nullable=True)
+    gpu_vram_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Extended host machine specs and ranking metadata
+    cpu_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    cpu_physical_cores: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cpu_logical_cores: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cpu_max_clock_mhz: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    memory_total_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cpu_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gpu_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    memory_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    machine_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ranking_version: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Bilateral access consent
     access_status: Mapped[str] = mapped_column(String, nullable=False, default="open")

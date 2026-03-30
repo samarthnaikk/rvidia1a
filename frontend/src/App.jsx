@@ -74,7 +74,7 @@ function App() {
         />
       )}
 
-      {currentPage === 'demo-architecture' && <DemoArchitecturePage />}
+      {currentPage === 'demo-architecture' && <DemoArchitecturePage onBackClick={() => setCurrentPage('home')} />}
 
       {currentPage === 'login' && (
         <LoginPage
