@@ -2,7 +2,17 @@ import { useEffect, useState } from 'react'
 import { acceptJobAccess, listJobs, listMarketplaceJobs, requestJobAccess } from '../lib/api'
 
 function DashboardPage({ authToken, onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
-  const defaultApiBase = 'http://157.180.74.2'
+  const defaultApiBase = (() => {
+    const configured = import.meta.env.VITE_API_BASE_URL
+    if (configured && typeof configured === 'string') {
+      return configured.replace(/\/$/, '')
+    }
+    const host = window.location.hostname
+    if (host === 'localhost' || host === '127.0.0.1') {
+      return 'http://localhost:8000'
+    }
+    return `${window.location.origin}/api`
+  })()
   const [marketplaceJobs, setMarketplaceJobs] = useState([])
   const [myJobs, setMyJobs] = useState([])
   const [hostError, setHostError] = useState('')
