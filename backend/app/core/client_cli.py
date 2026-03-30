@@ -1,0 +1,340 @@
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+from urllib import error, request
+
+
+DEFAULT_API_BASE = os.getenv("RVIDIA_API_BASE", "http://localhost:8000")
+DEFAULT_SESSION_PATH = Path(os.getenv("RVIDIA_CLI_SESSION", "~/.rvidia-cli/session.json")).expanduser()
+
+
+def _normalize_api_base(api_base: str) -> str:
+    return api_base.rstrip("/")
+
+
+def _session_dir() -> Path:
+    return DEFAULT_SESSION_PATH.parent
+
+
+def _load_session() -> dict[str, Any]:
+    if not DEFAULT_SESSION_PATH.exists():
+        return {}
+    try:
+        return json.loads(DEFAULT_SESSION_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_session(payload: dict[str, Any]) -> None:
+    _session_dir().mkdir(parents=True, exist_ok=True)
+    DEFAULT_SESSION_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _clear_session() -> None:
+    try:
+        if DEFAULT_SESSION_PATH.exists():
+            DEFAULT_SESSION_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _resolve_api_base(cli_api_base: str | None) -> str:
+    if cli_api_base:
+        return _normalize_api_base(cli_api_base)
+    session = _load_session()
+    session_base = str(session.get("api_base") or "").strip()
+    if session_base:
+        return _normalize_api_base(session_base)
+    return _normalize_api_base(DEFAULT_API_BASE)
+
+
+def _resolve_token(cli_token: str | None) -> str:
+    if cli_token:
+        return cli_token
+    session = _load_session()
+    token = str(session.get("access_token") or "").strip()
+    if token:
+        return token
+    raise RuntimeError("Not logged in. Run 'python -m app.core.client_cli login ...' first.")
+
+
+def _headers(token: str | None = None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _api_request(
+    method: str,
+    api_base: str,
+    path: str,
+    token: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+
+    url = f"{_normalize_api_base(api_base)}{path if path.startswith('/') else '/' + path}"
+    req = request.Request(url=url, method=method, headers=_headers(token), data=data)
+
+    try:
+        with request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            if not raw:
+                return {}
+            return json.loads(raw)
+    except error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(details) if details else {}
+        except json.JSONDecodeError:
+            parsed = {"detail": details}
+        message = parsed.get("detail") if isinstance(parsed, dict) else details
+        raise RuntimeError(f"API error {exc.code}: {message}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"API connection error: {exc.reason}") from exc
+
+
+def _print(data: Any) -> None:
+    print(json.dumps(data, indent=2, default=str))
+
+
+def cmd_signup(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    confirm_password = args.confirm_password if args.confirm_password is not None else args.password
+    payload = {
+        "username": args.username,
+        "email": args.email,
+        "password": args.password,
+        "confirm_password": confirm_password,
+    }
+    _print(_api_request("POST", api_base, "/auth/signup", payload=payload))
+
+
+def cmd_login(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    payload = {
+        "username_or_email": args.username_or_email,
+        "password": args.password,
+    }
+    token_payload = _api_request("POST", api_base, "/auth/login", payload=payload)
+    token = token_payload.get("access_token")
+    if not token:
+        raise RuntimeError("Login succeeded but no access_token was returned")
+
+    session_payload = {
+        "api_base": api_base,
+        "access_token": token,
+    }
+
+    try:
+        me = _api_request("GET", api_base, "/auth/me", token=token)
+        session_payload["user"] = me
+    except RuntimeError:
+        pass
+
+    _save_session(session_payload)
+    print(f"Logged in. Session saved to {DEFAULT_SESSION_PATH}")
+
+
+def cmd_logout(args: argparse.Namespace) -> None:
+    _ = args
+    _clear_session()
+    print("Logged out. Local session cleared.")
+
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("GET", api_base, "/auth/me", token=token))
+
+
+def cmd_create_job(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    payload = {
+        "repo_url": args.repo_url,
+        "branch": args.branch,
+        "command": args.command,
+    }
+    _print(_api_request("POST", api_base, "/jobs", token=token, payload=payload))
+
+
+def cmd_list_jobs(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    path = "/jobs/open" if args.open else "/jobs"
+    _print(_api_request("GET", api_base, path, token=token))
+
+
+def cmd_get_job(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("GET", api_base, f"/jobs/{args.job_id}", token=token))
+
+
+def cmd_list_marketplace(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("GET", api_base, "/p2p/jobs", token=token))
+
+
+def cmd_list_hosts(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("GET", api_base, "/p2p/hosts", token=token))
+
+
+def cmd_request_access(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("POST", api_base, f"/p2p/jobs/{args.job_id}/request-access", token=token, payload={}))
+
+
+def cmd_accept_access(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("POST", api_base, f"/p2p/jobs/{args.job_id}/accept-access", token=token, payload={}))
+
+
+def cmd_access_state(args: argparse.Namespace) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+    _print(_api_request("GET", api_base, f"/p2p/jobs/{args.job_id}/access", token=token))
+
+
+def _run_p2p_subcommand(args: argparse.Namespace, role: str) -> None:
+    api_base = _resolve_api_base(args.api_base)
+    token = _resolve_token(args.token)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "app.core.p2p_cli",
+        role,
+        "--api-base",
+        api_base,
+        "--token",
+        token,
+        "--job-id",
+        args.job_id,
+        "--workspace",
+        args.workspace,
+    ]
+
+    if args.secret_key:
+        cmd += ["--secret-key", args.secret_key]
+
+    if role == "host":
+        if args.no_request_access:
+            cmd += ["--no-request-access"]
+    elif role == "receiver":
+        cmd += ["--repo-url", args.repo_url, "--branch", args.branch, "--output-dir", args.output_dir]
+        if args.host_node_id:
+            cmd += ["--host-node-id", args.host_node_id]
+        if args.docker_args:
+            cmd += ["--docker-args", args.docker_args]
+
+    subprocess.run(cmd, check=True)
+
+
+def cmd_p2p_host(args: argparse.Namespace) -> None:
+    _run_p2p_subcommand(args, "host")
+
+
+def cmd_p2p_receiver(args: argparse.Namespace) -> None:
+    _run_p2p_subcommand(args, "receiver")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="RVIDIA CLI client")
+    parser.add_argument("--api-base", default=None, help="Backend API base URL (defaults to saved session or env)")
+    parser.add_argument("--token", default=None, help="Override bearer token (defaults to saved session)")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    signup = sub.add_parser("signup", help="Create account")
+    signup.add_argument("--username", required=True)
+    signup.add_argument("--email", required=True)
+    signup.add_argument("--password", required=True)
+    signup.add_argument("--confirm-password", default=None)
+    signup.set_defaults(handler=cmd_signup)
+
+    login = sub.add_parser("login", help="Login and save local session")
+    login.add_argument("--username-or-email", required=True)
+    login.add_argument("--password", required=True)
+    login.set_defaults(handler=cmd_login)
+
+    logout = sub.add_parser("logout", help="Clear local session")
+    logout.set_defaults(handler=cmd_logout)
+
+    whoami = sub.add_parser("whoami", help="Show current user")
+    whoami.set_defaults(handler=cmd_whoami)
+
+    create_job = sub.add_parser("create-job", help="Create a new GitHub job")
+    create_job.add_argument("--repo-url", required=True)
+    create_job.add_argument("--branch", default="main")
+    create_job.add_argument("--command", default="")
+    create_job.set_defaults(handler=cmd_create_job)
+
+    list_jobs = sub.add_parser("list-jobs", help="List your jobs")
+    list_jobs.add_argument("--open", action="store_true", help="List only open/in-progress jobs")
+    list_jobs.set_defaults(handler=cmd_list_jobs)
+
+    get_job = sub.add_parser("get-job", help="Get one job by ID")
+    get_job.add_argument("--job-id", required=True)
+    get_job.set_defaults(handler=cmd_get_job)
+
+    marketplace = sub.add_parser("marketplace", help="List marketplace jobs")
+    marketplace.set_defaults(handler=cmd_list_marketplace)
+
+    hosts = sub.add_parser("hosts", help="List registered hosts and GPU metadata")
+    hosts.set_defaults(handler=cmd_list_hosts)
+
+    request_access = sub.add_parser("request-access", help="Request access to a marketplace job")
+    request_access.add_argument("--job-id", required=True)
+    request_access.set_defaults(handler=cmd_request_access)
+
+    accept_access = sub.add_parser("accept-access", help="Accept access request for your job")
+    accept_access.add_argument("--job-id", required=True)
+    accept_access.set_defaults(handler=cmd_accept_access)
+
+    access_state = sub.add_parser("access-state", help="Show access state for a job")
+    access_state.add_argument("--job-id", required=True)
+    access_state.set_defaults(handler=cmd_access_state)
+
+    p2p_host = sub.add_parser("p2p-host", help="Run host worker for a job")
+    p2p_host.add_argument("--job-id", required=True)
+    p2p_host.add_argument("--workspace", default="./.p2p-workspaces")
+    p2p_host.add_argument("--secret-key", default=None)
+    p2p_host.add_argument("--no-request-access", action="store_true")
+    p2p_host.set_defaults(handler=cmd_p2p_host)
+
+    p2p_receiver = sub.add_parser("p2p-receiver", help="Run receiver worker for a job")
+    p2p_receiver.add_argument("--job-id", required=True)
+    p2p_receiver.add_argument("--repo-url", required=True)
+    p2p_receiver.add_argument("--branch", default="main")
+    p2p_receiver.add_argument("--docker-args", default="")
+    p2p_receiver.add_argument("--host-node-id", default="")
+    p2p_receiver.add_argument("--output-dir", default="./outputs")
+    p2p_receiver.add_argument("--workspace", default="./.p2p-workspaces")
+    p2p_receiver.add_argument("--secret-key", default=None)
+    p2p_receiver.set_defaults(handler=cmd_p2p_receiver)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()
