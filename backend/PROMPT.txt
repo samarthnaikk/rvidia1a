@@ -1,0 +1,176 @@
+Task: Fix Windows/WSL Docker + Iroh Failures in `docker-support-win` Without Regressing macOS
+
+Branch Target
+- Work only on branch: `docker-support-win`.
+- Do not switch branches.
+
+Hard Constraints
+- Do not break or alter current macOS success path. macOS behavior must remain functionally identical unless a change is explicitly needed for shared correctness.
+- Keep Linux/macOS defaults intact; add Windows/WSL-specific handling via guarded logic.
+- Commit regularly in small, logical checkpoints (see commit plan below).
+
+Current Failures to Solve
+1. Host side fails to run container on Windows/WSL when GPU is not available:
+   - `docker run ... --gpus all` exits with code `125`.
+   - Error includes: `WSL environment detected but no adapters were found`.
+   - Existing fallback detection does not catch this string reliably, so CPU fallback is skipped.
+
+2. Receiver side fails to persist artifact ticket:
+   - `iroh.iroh_ffi.IrohError` on `write_to_path`.
+   - Fails for both primary and fallback path under `/mnt/c/.../backend/outputs/...`.
+   - Existing fallback writes into same Windows-mounted filesystem and therefore does not mitigate.
+
+Primary Goal
+- Make Host execution resilient on Windows/WSL:
+  - If GPU runtime is unavailable, automatically retry container on CPU and finish job.
+- Make Receiver artifact persistence resilient on Windows/WSL:
+  - If direct write to target path fails, download to Linux-native temp path and atomically copy/move into requested output path.
+- Preserve macOS behavior as-is.
+
+Files In Scope
+- `backend/app/core/p2p_cli.py` (main changes)
+- Optional minimal docs update if needed:
+  - `backend/PROMPT.md` or `README.md` only for usage clarification (keep concise)
+
+Implementation Requirements
+
+1) Robust Docker GPU fallback in host flow
+Target area: `_host_execute_docker(...)` in `backend/app/core/p2p_cli.py`
+
+Current issue:
+- Fallback only triggers for limited substrings:
+  - `"could not select device driver"`
+  - `"capabilities: [[gpu]]"`
+- Windows/WSL error `"WSL environment detected but no adapters were found"` is not included, so command exits 125 and job fails.
+
+Required changes:
+- Add a helper:
+  - `_is_gpu_runtime_unavailable(stderr_or_logs: str) -> bool`
+- Return true for a broader set of case-insensitive signals, including:
+  - `"could not select device driver"`
+  - `"capabilities: [[gpu]]"`
+  - `"nvidia-container-cli: initialization error"`
+  - `"wsl environment detected but no adapters were found"`
+  - `"no cuda-capable device"`
+  - `"unknown runtime specified nvidia"` (defensive)
+  - `"could not load nvml"` (defensive)
+- Keep GPU-first behavior unchanged.
+- If GPU run fails and helper returns true:
+  - Log explicit message:
+    - `GPU runtime unavailable on this host; retrying without --gpus all`
+  - Retry `docker run` without GPU flags.
+- If GPU run fails for non-GPU reasons, do not mask real failure; preserve failure path.
+- Ensure final completion status reflects CPU fallback outcome (`success = run_rc == 0`).
+
+2) Safer command construction for docker run/build/clone
+Target area: `_host_execute_docker(...)`
+
+Required changes:
+- Replace shell-string concatenation for git/docker commands with argument-list subprocess execution where practical to avoid quoting/space issues on Windows paths.
+- For volume mount, ensure host path is absolute and stable:
+  - Use `Path.resolve()`.
+  - Keep mount to `/outputs` only (security and compatibility).
+- Preserve support for `--docker-args`, but parse safely:
+  - Use `shlex.split(..., posix=False)` or equivalent guarded parser to avoid broken quoting on Windows.
+  - If parsing fails, raise clear `RuntimeError` with hint.
+
+3) WSL-aware artifact write fallback for iroh
+Target area: `_download_ticket_to_path(...)` in `backend/app/core/p2p_cli.py`
+
+Current issue:
+- Primary and fallback paths both point to `/mnt/c/...`; both can fail similarly with iroh FFI.
+
+Required changes:
+- Keep existing primary behavior first:
+  - Ensure parent exists.
+  - Try write to requested absolute destination.
+- On failure:
+  - Log detailed diagnostics:
+    - destination path
+    - parent dir permissions (existing)
+    - `platform.system()`
+    - whether running in WSL (detected via `/proc/version` or env)
+  - Attempt second strategy:
+    - write ticket to Linux-native temp directory (e.g. `/tmp/rvidia-iroh/<uuid>/artifact.ext`) using `tempfile` + `Path`.
+    - then copy to requested destination using Python file copy (`shutil.copy2`) or replace semantics.
+  - Ensure destination parent exists before copy.
+  - Return final destination path if copy succeeds.
+- Optional third strategy:
+  - If final copy to requested path fails, keep temp artifact and raise error that includes temp file path for manual recovery.
+
+4) Keep macOS behavior untouched
+Required guardrails:
+- Any WSL-specific handling must be inside explicit platform checks:
+  - Example helper:
+    - `_is_wsl() -> bool`
+- No changes to macOS runtime flags unless necessary for shared logic.
+- Do not add mandatory dependencies that alter mac setup.
+
+5) Improve host logging around fallback decisions
+Target area: `_host_execute_docker(...)`
+
+Required logs:
+- Print whether GPU was requested.
+- If GPU path fails, print why fallback triggered (matched token or summarized stderr).
+- Print final mode used:
+  - `Execution mode: GPU` or `Execution mode: CPU fallback`
+- Keep existing log format prefixes (`[RVIDIA]`, `[docker run]`, etc.).
+
+6) Receiver robustness for output directory
+Target area: `run_receiver(...)` and `_download_ticket_to_path(...)`
+
+Required changes:
+- Ensure output directory normalization uses absolute path (`resolve()`).
+- Before downloading each artifact:
+  - log target absolute path.
+- If fallback temp-path strategy used, log final copied destination.
+
+7) Regression prevention for macOS/Linux
+Add lightweight tests (unit style, no Docker daemon required) under `backend/tests/`:
+- `test_gpu_fallback_detection.py`
+  - validates `_is_gpu_runtime_unavailable(...)` detects all required messages.
+- `test_wsl_detection.py`
+  - validates WSL detector logic with mocked `/proc/version`.
+- `test_artifact_fallback_path_logic.py`
+  - mocks iroh write failure on target path and success on temp path, asserts final copy destination.
+
+If there is no existing test harness:
+- Add minimal pytest setup without intrusive project restructuring.
+- Keep tests focused and fast.
+
+8) Manual verification checklist (must run and record in PR notes/commit message body)
+From WSL host environment:
+1. Start host command with a repo that can run on CPU.
+2. Force/observe GPU unavailable scenario (same environment where no adapters exist).
+3. Confirm host retries without `--gpus all`.
+4. Confirm host returns success or meaningful non-GPU failure.
+5. Run receiver and confirm artifact is saved into requested output directory.
+6. Confirm no unhandled `IrohError` when writing to `/mnt/c/...`.
+
+From macOS environment (or CI equivalent if available):
+1. Run current happy-path host/receiver flow.
+2. Confirm behavior is unchanged (no new required flags, no regression in successful runs).
+
+9) Commit plan (commit regularly)
+Make small commits in this order:
+1. `fix(p2p): broaden docker gpu-unavailable detection and cpu fallback`
+2. `refactor(p2p): safer subprocess arg handling for git/docker commands`
+3. `fix(iroh): add wsl-safe temp-path fallback for artifact writes`
+4. `test(p2p): add unit tests for gpu fallback and wsl artifact path strategy`
+5. `docs(p2p): add windows/wsl runtime notes (no mac behavior changes)`
+
+Definition of Done
+- Host no longer hard-fails with exit code 125 on Windows/WSL GPU-missing environments; it retries on CPU automatically.
+- Receiver can successfully persist artifacts even when direct iroh write to `/mnt/c/...` fails.
+- macOS path remains working (explicitly verified).
+- Added tests pass locally.
+- Commit history is incremental and descriptive.
+
+Non-Goals
+- Do not redesign marketplace/access flow.
+- Do not alter API contracts unless required for error clarity.
+- Do not remove GPU support; only make fallback reliable.
+
+Important Reminder
+- macOS is currently working. Do not change behavior for macOS except shared-safe improvements that are validated not to break it.
+- Commit regularly after each logical milestone.
