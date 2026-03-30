@@ -33,6 +33,10 @@ class JobResponse(BaseModel):
     status: str
     host_node_id: str | None
     receiver_node_id: str | None
+    latest_host_node_id: str | None
+    latest_receiver_node_id: str | None
+    session_version: int
+    artifact_state: str
     gpu_model: str | None
     gpu_vram: str | None
     gpu_driver: str | None
@@ -75,3 +79,7 @@ class SignalCandidateRequest(BaseModel):
     from_node_id: str
     to_node_id: str
     candidate: str
+
+
+class ArtifactStateUpdateRequest(BaseModel):
+    artifact_state: str
