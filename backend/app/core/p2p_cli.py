@@ -387,17 +387,37 @@ async def _host_execute_docker(
     # 3. Docker run — GPU pass-through, /outputs volume, extra docker_args.
     abs_outputs = str(outputs_dir.resolve())
     extra = docker_args.strip() if docker_args else ""
-    run_cmd = (
-        f"docker run --rm --gpus all "
-        f"-v {abs_outputs}:/outputs "
-        f"{extra} "
-        f"{image_tag}"
-    ).strip()
+    def _build_run_cmd(use_gpu: bool) -> str:
+        gpu_segment = "--gpus all " if use_gpu else ""
+        return (
+            f"docker run --rm {gpu_segment}"
+            f"-v {abs_outputs}:/outputs "
+            f"{extra} "
+            f"{image_tag}"
+        ).strip()
+
     print(f"[RVIDIA] Running container '{image_tag}'...")
-    run_proc, run_logs, run_captured = await _run_command_with_logs(run_cmd, workspace_dir)
+    run_rc = 1
+    run_captured: list[str] = []
+
+    # Prefer GPU runtime, but fall back to CPU when Docker GPU runtime is unavailable.
+    gpu_first = _build_run_cmd(use_gpu=True)
+    run_proc, run_logs, run_captured = await _run_command_with_logs(gpu_first, workspace_dir)
     async for line in run_logs:
         print(f"[docker run] {line}")
     run_rc = await run_proc.wait()
+
+    if run_rc != 0:
+        combined = "\n".join(run_captured).lower()
+        gpu_unavailable = "could not select device driver" in combined or "capabilities: [[gpu]]" in combined
+        if gpu_unavailable:
+            print("[RVIDIA] Docker GPU runtime unavailable; retrying container without GPU flags.")
+            cpu_fallback = _build_run_cmd(use_gpu=False)
+            cpu_proc, cpu_logs, cpu_captured = await _run_command_with_logs(cpu_fallback, workspace_dir)
+            async for line in cpu_logs:
+                print(f"[docker run] {line}")
+            run_rc = await cpu_proc.wait()
+            run_captured.extend(["", "[CPU FALLBACK]"] + cpu_captured)
 
     # 4. Write execution log.
     logs_file = workspace_dir / "execution.log"
