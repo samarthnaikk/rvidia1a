@@ -1,7 +1,30 @@
 import rightSideBackground from '../assets/bg.png'
 import operationalOverlayImage from '../assets/Overlay+Border+Shadow+OverlayBlur.png'
+import { login } from '../lib/api'
+import { useState } from 'react'
 
 function LoginPage({ onCreateAccountClick, onLoginSuccess }) {
+  const [usernameOrEmail, setUsernameOrEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+
+  const handleLogin = async () => {
+    setIsSubmitting(true)
+    setErrorMessage('')
+    try {
+      const data = await login({
+        username_or_email: usernameOrEmail,
+        password,
+      })
+      onLoginSuccess(data.access_token)
+    } catch (error) {
+      setErrorMessage(error.message)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   return (
     <section className="relative grid min-h-screen w-full grid-cols-1 overflow-hidden lg:grid-cols-2">
       <div className="pointer-events-none absolute inset-y-0 left-0 w-full bg-black lg:w-1/2" />
@@ -31,11 +54,13 @@ function LoginPage({ onCreateAccountClick, onLoginSuccess }) {
         </p>
 
         <div className="mt-10 max-w-[520px] rounded-[10px] border border-white/10 bg-[#0c1321bf] p-7 shadow-[0_0_0_1px_rgba(51,65,85,0.4),0_20px_40px_rgba(2,6,23,0.45)] backdrop-blur-sm">
-          <label className="mb-2 block text-[10px] uppercase tracking-[3px] text-slate-500">E-Mail</label>
+          <label className="mb-2 block text-[10px] uppercase tracking-[3px] text-slate-500">Username or E-Mail</label>
           <input
             className="font-jetbrains mb-5 h-[50px] w-full border-b border-b-white/10 bg-transparent px-1 text-[15px] text-slate-300 outline-none placeholder:text-slate-500/70 focus:border-b-emerald-300/60"
-            placeholder="user@gmail.com"
-            type="email"
+            onChange={(event) => setUsernameOrEmail(event.target.value)}
+            placeholder="user@gmail.com or username"
+            type="text"
+            value={usernameOrEmail}
           />
 
           <div className="mb-2 flex items-center justify-between">
@@ -46,25 +71,21 @@ function LoginPage({ onCreateAccountClick, onLoginSuccess }) {
           </div>
           <input
             className="font-jetbrains mb-7 h-[50px] w-full border-b border-b-white/10 bg-transparent px-1 text-[15px] text-slate-300 outline-none placeholder:text-slate-500/70 focus:border-b-emerald-300/60"
+            onChange={(event) => setPassword(event.target.value)}
             placeholder="••••••••"
             type="password"
+            value={password}
           />
+
+          {errorMessage && <p className="mb-4 text-[13px] text-red-300">{errorMessage}</p>}
 
           <button
             className="h-[56px] w-full rounded-[2px] border border-emerald-200/70 bg-[#95f2bd] text-[14px] font-bold uppercase tracking-[3px] text-[#0b2d1e] shadow-[0_0_22px_rgba(134,239,172,0.25)]"
-            onClick={onLoginSuccess}
+            disabled={isSubmitting}
+            onClick={handleLogin}
             type="button"
           >
-            Log In
-          </button>
-
-          <div className="my-8 text-center text-[10px] uppercase tracking-[3px] text-slate-500">Third Party Verification</div>
-
-          <button
-            className="mx-auto block h-[42px] w-[190px] rounded-[2px] border border-white/10 bg-transparent text-[11px] uppercase tracking-[2px] text-slate-400"
-            type="button"
-          >
-            ⟠ Google
+            {isSubmitting ? 'Logging In...' : 'Log In'}
           </button>
         </div>
 

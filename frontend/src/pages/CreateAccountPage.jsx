@@ -1,6 +1,36 @@
 import createAccountRightImage from '../assets/image.png'
+import { useState } from 'react'
+import { login, signup } from '../lib/api'
 
 function CreateAccountPage({ onBackToLogin, onCreateAccountSuccess }) {
+  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+
+  const handleCreateAccount = async () => {
+    setIsSubmitting(true)
+    setErrorMessage('')
+    try {
+      await signup({
+        username,
+        email,
+        password,
+        confirm_password: password,
+      })
+      const auth = await login({
+        username_or_email: username,
+        password,
+      })
+      onCreateAccountSuccess(auth.access_token)
+    } catch (error) {
+      setErrorMessage(error.message)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   return (
     <section className="relative grid min-h-screen w-full grid-cols-1 overflow-hidden lg:grid-cols-2">
       <div className="pointer-events-none absolute inset-y-0 left-0 w-full bg-black lg:w-1/2" />
@@ -30,23 +60,31 @@ function CreateAccountPage({ onBackToLogin, onCreateAccountSuccess }) {
           <label className="mb-2 block text-[10px] uppercase tracking-[3px] text-emerald-300/80">E-Mail</label>
           <input
             className="font-jetbrains mb-5 h-[50px] w-full rounded-[6px] bg-[#0a0f19] px-4 text-[15px] text-slate-300 outline-none placeholder:text-slate-500/70 focus:ring-1 focus:ring-emerald-300/40"
+            onChange={(event) => setEmail(event.target.value)}
             placeholder="e.g. ALPHA@gmail.com"
             type="email"
+            value={email}
           />
 
           <label className="mb-2 block text-[10px] uppercase tracking-[3px] text-emerald-300/80">Username</label>
           <input
             className="font-jetbrains mb-5 h-[50px] w-full rounded-[6px] bg-[#0a0f19] px-4 text-[15px] text-slate-300 outline-none placeholder:text-slate-500/70 focus:ring-1 focus:ring-emerald-300/40"
+            onChange={(event) => setUsername(event.target.value)}
             placeholder="e.g. ALPHA_VANGUARD_01"
             type="text"
+            value={username}
           />
 
           <label className="mb-2 block text-[10px] uppercase tracking-[3px] text-emerald-300/80">Password</label>
           <input
             className="font-jetbrains mb-7 h-[50px] w-full rounded-[6px] bg-[#0a0f19] px-4 text-[15px] text-slate-300 outline-none placeholder:text-slate-500/70 focus:ring-1 focus:ring-emerald-300/40"
+            onChange={(event) => setPassword(event.target.value)}
             placeholder="••••••••••••••••"
             type="password"
+            value={password}
           />
+
+          {errorMessage && <p className="mb-4 text-[13px] text-red-300">{errorMessage}</p>}
 
           <div className="mb-7 rounded-[8px] border border-white/10 bg-[#0f1726] px-4 py-3 text-[10px] leading-[1.6] tracking-[0.5px] text-slate-500">
             SECURITY_PROTOCOL: Keys are hashed locally. RVIDIA does not store plain-text secrets on centralized relays.
@@ -54,10 +92,11 @@ function CreateAccountPage({ onBackToLogin, onCreateAccountSuccess }) {
 
           <button
             className="h-[56px] w-full rounded-[6px] border border-emerald-200/70 bg-[#95f2bd] text-[14px] font-bold uppercase tracking-[3px] text-[#0b2d1e] shadow-[0_0_22px_rgba(134,239,172,0.25)]"
-            onClick={onCreateAccountSuccess}
+            disabled={isSubmitting}
+            onClick={handleCreateAccount}
             type="button"
           >
-            Create_Account
+            {isSubmitting ? 'Creating_Account...' : 'Create_Account'}
           </button>
 
           <div className="mt-10 flex items-center justify-between border-t border-t-white/10 pt-6">

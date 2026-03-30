@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-function DashboardPage({ onBackHome }) {
+function DashboardPage({ onBackHome, onGoSubmit, onGoResults, onLogout, currentUser }) {
   const [selectedFile, setSelectedFile] = useState(null)
   const [userQuery, setUserQuery] = useState('')
 
@@ -13,14 +13,27 @@ function DashboardPage({ onBackHome }) {
             <h1 className="mt-2 text-[42px] font-bold leading-[1.1] text-slate-100">
               Unified <span className="text-emerald-300">Dashboard</span>
             </h1>
+            <p className="mt-3 text-[14px] text-slate-400">
+              Signed in as <span className="text-emerald-200">{currentUser?.username || 'Unknown User'}</span>
+            </p>
           </div>
-          <button
-            className="rounded border border-white/20 px-4 py-2 text-[12px] uppercase tracking-[2px] text-slate-300 transition hover:border-emerald-300/60 hover:text-emerald-200"
-            onClick={onBackHome}
-            type="button"
-          >
-            Back Home
-          </button>
+
+          <div className="flex gap-3">
+            <button
+              className="rounded border border-white/20 px-4 py-2 text-[12px] uppercase tracking-[2px] text-slate-300 transition hover:border-emerald-300/60 hover:text-emerald-200"
+              onClick={onBackHome}
+              type="button"
+            >
+              Back Home
+            </button>
+            <button
+              className="rounded border border-red-300/30 px-4 py-2 text-[12px] uppercase tracking-[2px] text-red-200 transition hover:border-red-300/60"
+              onClick={onLogout}
+              type="button"
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-2">
@@ -60,9 +73,18 @@ function DashboardPage({ onBackHome }) {
 
             <button
               className="mt-4 h-[48px] w-full rounded-[6px] border border-emerald-200/70 bg-[#95f2bd] text-[13px] font-bold uppercase tracking-[3px] text-[#0b2d1e]"
+              onClick={onGoSubmit}
               type="button"
             >
-              Search User
+              Submit GPU Job
+            </button>
+
+            <button
+              className="mt-3 h-[46px] w-full rounded-[6px] border border-white/20 bg-transparent text-[12px] font-bold uppercase tracking-[2px] text-slate-300"
+              onClick={onGoResults}
+              type="button"
+            >
+              View Job Status / Results
             </button>
           </div>
         </div>
