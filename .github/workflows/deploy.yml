@@ -1,18 +1,46 @@
-name: Deploy
+version: "3.9"
 
-on:
-  push:
-    branches:
-      - prod
+services:
+  backend:
+    build: ./backend
+    restart: always
+    depends_on:
+      - postgres
+    profiles: ["dev", "prod"]
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      SECRET_KEY: rvidia-dev-secret
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
 
-jobs:
-  deploy:
-    runs-on: self-hosted
+  frontend:
+    build: ./frontend
+    profiles: ["dev", "prod"]
+    ports:
+      - "3000:3000"
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  postgres:
+    build: ./postgres
+    profiles: ["dev", "prod"]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
 
-      - name: Deploy with Docker
-        run: |
-          docker compose --profile prod up -d --build
+  nginx:
+    build: ./nginx
+    profiles: ["prod"]
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  pgdata:

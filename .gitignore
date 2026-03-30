@@ -14,7 +14,7 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 *.lnk
-
+.p2p-workspace*
 # Python
 __pycache__/
 *.py[cod]
