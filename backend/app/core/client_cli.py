@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -277,25 +278,131 @@ def _prompt(label: str, default: str | None = None, secret: bool = False, requir
         print("Value is required.")
 
 
+def _to_bool(value: str) -> bool:
+    return value.strip().lower() in {"y", "yes", "true", "1"}
+
+
+def _short(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "~"
+
+
+def _fmt_timestamp(value: str | None) -> str:
+    if not value:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt.strftime("%m-%d %H:%M")
+    except ValueError:
+        return value
+
+
+def _print_job_picker(title: str, jobs: list[dict[str, Any]]) -> None:
+    print(f"\n{title}")
+    print("=" * len(title))
+    if not jobs:
+        print("No jobs found.")
+        return
+
+    print(f"{'No':<4}{'Job ID':<14}{'Status':<14}{'Access':<12}{'Repo/File':<36}{'Created':<12}")
+    print("-" * 92)
+    for idx, job in enumerate(jobs, start=1):
+        job_id = str(job.get("id") or "")
+        status = str(job.get("status") or "-")
+        access = str(job.get("access_status") or "-")
+        repo_or_file = str(job.get("repo_url") or job.get("filename") or "-")
+        created = _fmt_timestamp(job.get("created_at"))
+        print(
+            f"{idx:<4}{_short(job_id, 12):<14}{_short(status, 12):<14}{_short(access, 10):<12}{_short(repo_or_file, 34):<36}{_short(created, 11):<12}"
+        )
+
+
+def _fetch_jobs(api_base: str, open_only: bool = False) -> list[dict[str, Any]]:
+    token = _resolve_token(None)
+    path = "/jobs/open" if open_only else "/jobs"
+    data = _api_request("GET", api_base, path, token=token)
+    return data if isinstance(data, list) else []
+
+
+def _fetch_marketplace_jobs(api_base: str) -> list[dict[str, Any]]:
+    token = _resolve_token(None)
+    data = _api_request("GET", api_base, "/p2p/jobs", token=token)
+    return data if isinstance(data, list) else []
+
+
+def _select_job(
+    api_base: str,
+    source: str,
+    title: str,
+    open_only: bool = False,
+    allow_manual: bool = True,
+) -> dict[str, Any] | None:
+    while True:
+        jobs = _fetch_jobs(api_base, open_only=open_only) if source == "my" else _fetch_marketplace_jobs(api_base)
+        _print_job_picker(title, jobs)
+
+        if jobs:
+            prompt = "Select job number"
+        else:
+            prompt = "No jobs available"
+
+        suffix = " (r=refresh"
+        if allow_manual:
+            suffix += ", m=manual ID"
+        suffix += ", q=cancel)"
+
+        choice = _prompt(f"{prompt}{suffix}", required=True).lower()
+        if choice == "q":
+            return None
+        if choice == "r":
+            continue
+        if allow_manual and choice == "m":
+            manual_id = _prompt("Enter Job ID", required=True)
+            return {"id": manual_id}
+
+        if choice.isdigit():
+            index = int(choice)
+            if 1 <= index <= len(jobs):
+                return jobs[index - 1]
+
+        print("Invalid selection. Pick a listed number, r, m, or q.")
+
+
+def _print_tui_header(api_base: str) -> None:
+    print("\nRVIDIA Control Center")
+    print("=====================")
+    print(f"API: {api_base}")
+    try:
+        me = _api_request("GET", api_base, "/auth/me", token=_resolve_token(None))
+        username = me.get("username") if isinstance(me, dict) else None
+        email = me.get("email") if isinstance(me, dict) else None
+        print(f"User: {username or '-'} ({email or '-'})")
+    except RuntimeError:
+        print("User: not logged in")
+
+
 def cmd_tui(args: argparse.Namespace) -> None:
     api_base = _resolve_api_base(args.api_base)
-    print("RVIDIA CLI TUI")
-    print(f"Using API base: {api_base}")
+    print("Launching interactive mode. Type option numbers to run actions.")
 
     while True:
-        print("\nSelect an action:")
+        _print_tui_header(api_base)
+        print("\nMain Menu")
+        print("---------")
         print(" 1) Login")
         print(" 2) Signup")
         print(" 3) Whoami")
         print(" 4) Create Job")
         print(" 5) List My Jobs")
         print(" 6) List Marketplace Jobs")
-        print(" 7) Request Access")
-        print(" 8) Accept Access")
-        print(" 9) Show Access State")
-        print("10) Run P2P Host")
-        print("11) Run P2P Receiver")
-        print("12) Logout")
+        print(" 7) Request Access (job picker)")
+        print(" 8) Accept Access (job picker)")
+        print(" 9) Show Access State (job picker)")
+        print("10) Run P2P Host (job picker)")
+        print("11) Run P2P Receiver (job picker + auto-fill)")
+        print("12) Switch API Base")
+        print("13) Logout")
         print(" 0) Exit")
 
         choice = _prompt("Choice", required=True)
@@ -341,23 +448,58 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     )
                 )
             elif choice == "5":
-                open_only = _prompt("Open jobs only? (y/N)", default="n").lower() in {"y", "yes"}
+                open_only = _to_bool(_prompt("Open jobs only? (y/N)", default="n"))
                 cmd_list_jobs(argparse.Namespace(api_base=api_base, token=None, open=open_only))
             elif choice == "6":
                 cmd_list_marketplace(argparse.Namespace(api_base=api_base, token=None))
             elif choice == "7":
-                job_id = _prompt("Job ID", required=True)
+                selected = _select_job(
+                    api_base,
+                    source="market",
+                    title="Marketplace Jobs (request access)",
+                    allow_manual=True,
+                )
+                if selected is None:
+                    continue
+                job_id = str(selected.get("id") or "")
                 cmd_request_access(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
             elif choice == "8":
-                job_id = _prompt("Job ID", required=True)
+                selected = _select_job(
+                    api_base,
+                    source="my",
+                    title="Your Jobs (accept access)",
+                    allow_manual=True,
+                )
+                if selected is None:
+                    continue
+                job_id = str(selected.get("id") or "")
                 cmd_accept_access(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
             elif choice == "9":
-                job_id = _prompt("Job ID", required=True)
+                source_choice = _prompt("Check access for (1=my jobs, 2=marketplace)", default="1")
+                source = "market" if source_choice == "2" else "my"
+                selected = _select_job(
+                    api_base,
+                    source=source,
+                    title="Pick Job (access state)",
+                    allow_manual=True,
+                )
+                if selected is None:
+                    continue
+                job_id = str(selected.get("id") or "")
                 cmd_access_state(argparse.Namespace(api_base=api_base, token=None, job_id=job_id))
             elif choice == "10":
-                job_id = _prompt("Job ID", required=True)
+                selected = _select_job(
+                    api_base,
+                    source="my",
+                    title="Your Jobs (run host)",
+                    open_only=True,
+                    allow_manual=True,
+                )
+                if selected is None:
+                    continue
+                job_id = str(selected.get("id") or "")
                 workspace = _prompt("Workspace", default="./.p2p-workspaces")
-                no_request_access = _prompt("Disable auto request-access? (y/N)", default="n").lower() in {"y", "yes"}
+                no_request_access = _to_bool(_prompt("Disable auto request-access? (y/N)", default="n"))
                 secret_key = _prompt("Secret key (optional)", default="")
                 cmd_p2p_host(
                     argparse.Namespace(
@@ -370,9 +512,21 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     )
                 )
             elif choice == "11":
-                job_id = _prompt("Job ID", required=True)
-                repo_url = _prompt("Repo URL", required=True)
-                branch = _prompt("Branch", default="main")
+                selected = _select_job(
+                    api_base,
+                    source="my",
+                    title="Your Jobs (run receiver)",
+                    open_only=True,
+                    allow_manual=True,
+                )
+                if selected is None:
+                    continue
+                job_id = str(selected.get("id") or "")
+
+                default_repo = str(selected.get("repo_url") or "")
+                default_branch = str(selected.get("branch") or "main")
+                repo_url = _prompt("Repo URL", default=default_repo, required=not bool(default_repo))
+                branch = _prompt("Branch", default=default_branch)
                 docker_args = _prompt("Docker args (optional)", default="")
                 host_node_id = _prompt("Host node ID (optional)", default="")
                 output_dir = _prompt("Output directory", default="./outputs")
@@ -393,6 +547,10 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     )
                 )
             elif choice == "12":
+                new_base = _prompt("New API base", default=api_base, required=True)
+                api_base = _resolve_api_base(new_base)
+                print(f"API base set to: {api_base}")
+            elif choice == "13":
                 cmd_logout(argparse.Namespace())
             elif choice == "0":
                 print("Exiting TUI.")
@@ -401,6 +559,8 @@ def cmd_tui(args: argparse.Namespace) -> None:
                 print("Unknown choice. Please select a number from the menu.")
         except (RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"Error: {exc}")
+        except KeyboardInterrupt:
+            print("\nCancelled current action.")
 
 
 def build_parser() -> argparse.ArgumentParser:

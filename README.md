@@ -50,6 +50,11 @@ Interactive mode (menu-driven, minimal typing):
 python -m app.core.client_cli tui --api-base http://localhost:8000
 ```
 
+TUI highlights:
+- Job picker menus for access, host, and receiver actions (no need to paste IDs each time)
+- Auto-filled repo/branch for receiver when available
+- Runtime API base switching from inside the menu
+
 Login once (session is persisted at `~/.rvidia-cli/session.json`):
 
 ```bash
