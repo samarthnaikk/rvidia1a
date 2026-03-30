@@ -515,16 +515,27 @@ def cmd_tui(args: argparse.Namespace) -> None:
         async def on_option_list_option_selected(self, event) -> None:
             await self._run_action(self.ACTIONS[event.option_index][0])
 
+        async def _push_screen_result(self, screen):
+            loop = asyncio.get_running_loop()
+            result_future = loop.create_future()
+
+            def _on_dismiss(result) -> None:
+                if not result_future.done():
+                    result_future.set_result(result)
+
+            self.push_screen(screen, callback=_on_dismiss)
+            return await result_future
+
         async def _pick_job(self, title: str, use_market: bool = False, open_only: bool = False):
             jobs = self.market_jobs if use_market else self.my_jobs
             if open_only:
                 jobs = [j for j in jobs if str(j.get("status") or "") in {"queued", "in_progress", "transferring"}]
-            return await self.push_screen_wait(JobPickerScreen(title, jobs))
+            return await self._push_screen_result(JobPickerScreen(title, jobs))
 
         async def _run_action(self, action_key: str) -> None:
             try:
                 if action_key == "login":
-                    values = await self.push_screen_wait(FormScreen("Login", [{"key": "username_or_email", "label": "Username or email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}]))
+                    values = await self._push_screen_result(FormScreen("Login", [{"key": "username_or_email", "label": "Username or email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}]))
                     if not values:
                         return
                     payload = _api_request("POST", self.api_base, "/auth/login", payload=values)
@@ -540,14 +551,14 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     self._log("Logged in and session saved")
                     await self.action_refresh()
                 elif action_key == "signup":
-                    values = await self.push_screen_wait(FormScreen("Signup", [{"key": "username", "label": "Username", "required": True}, {"key": "email", "label": "Email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}, {"key": "confirm_password", "label": "Confirm password", "password": True, "required": True}]))
+                    values = await self._push_screen_result(FormScreen("Signup", [{"key": "username", "label": "Username", "required": True}, {"key": "email", "label": "Email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}, {"key": "confirm_password", "label": "Confirm password", "password": True, "required": True}]))
                     if not values:
                         return
                     self._log("Signup completed", _api_request("POST", self.api_base, "/auth/signup", payload=values))
                 elif action_key == "whoami":
                     self._log("Current user", _api_request("GET", self.api_base, "/auth/me", token=_resolve_token(None)))
                 elif action_key == "create_job":
-                    values = await self.push_screen_wait(FormScreen("Create Job", [{"key": "repo_url", "label": "Repo URL", "required": True}, {"key": "branch", "label": "Branch", "default": "main"}, {"key": "command", "label": "Command (optional)", "default": ""}]))
+                    values = await self._push_screen_result(FormScreen("Create Job", [{"key": "repo_url", "label": "Repo URL", "required": True}, {"key": "branch", "label": "Branch", "default": "main"}, {"key": "command", "label": "Command (optional)", "default": ""}]))
                     if not values:
                         return
                     self._log("Job created", _api_request("POST", self.api_base, "/jobs", token=_resolve_token(None), payload=values))
@@ -573,7 +584,7 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     self._log(f"Accepted access for job {job_id}", _api_request("POST", self.api_base, f"/p2p/jobs/{job_id}/accept-access", token=_resolve_token(None), payload={}))
                     await self.action_refresh()
                 elif action_key == "access_state":
-                    values = await self.push_screen_wait(FormScreen("Access State Source", [{"key": "source", "label": "Type 'my' or 'market'", "default": "my", "required": True}]))
+                    values = await self._push_screen_result(FormScreen("Access State Source", [{"key": "source", "label": "Type 'my' or 'market'", "default": "my", "required": True}]))
                     if not values:
                         return
                     selected = await self._pick_job("Pick job for access state", use_market=values["source"].strip().lower() == "market")
@@ -585,7 +596,7 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     selected = await self._pick_job("Pick your job for host", open_only=True)
                     if not selected:
                         return
-                    values = await self.push_screen_wait(FormScreen("Host Options", [{"key": "workspace", "label": "Workspace", "default": "./.p2p-workspaces"}, {"key": "disable_request", "label": "Disable auto request-access (y/n)", "default": "n"}, {"key": "secret_key", "label": "Secret key (optional)", "default": ""}]))
+                    values = await self._push_screen_result(FormScreen("Host Options", [{"key": "workspace", "label": "Workspace", "default": "./.p2p-workspaces"}, {"key": "disable_request", "label": "Disable auto request-access (y/n)", "default": "n"}, {"key": "secret_key", "label": "Secret key (optional)", "default": ""}]))
                     if not values:
                         return
                     await asyncio.to_thread(_run_p2p_subcommand, argparse.Namespace(api_base=self.api_base, token=None, job_id=str(selected.get("id") or ""), workspace=values["workspace"] or "./.p2p-workspaces", no_request_access=values["disable_request"].strip().lower() in {"y", "yes", "1", "true"}, secret_key=values["secret_key"] or None), "host")
@@ -595,13 +606,13 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     if not selected:
                         return
                     default_repo = str(selected.get("repo_url") or "")
-                    values = await self.push_screen_wait(FormScreen("Receiver Options", [{"key": "repo_url", "label": "Repo URL", "default": default_repo, "required": not bool(default_repo)}, {"key": "branch", "label": "Branch", "default": str(selected.get("branch") or "main")}, {"key": "docker_args", "label": "Docker args (optional)", "default": ""}, {"key": "host_node_id", "label": "Host node ID (optional)", "default": ""}, {"key": "output_dir", "label": "Output directory", "default": "./outputs"}, {"key": "workspace", "label": "Workspace", "default": "./.p2p-workspaces"}, {"key": "secret_key", "label": "Secret key (optional)", "default": ""}]))
+                    values = await self._push_screen_result(FormScreen("Receiver Options", [{"key": "repo_url", "label": "Repo URL", "default": default_repo, "required": not bool(default_repo)}, {"key": "branch", "label": "Branch", "default": str(selected.get("branch") or "main")}, {"key": "docker_args", "label": "Docker args (optional)", "default": ""}, {"key": "host_node_id", "label": "Host node ID (optional)", "default": ""}, {"key": "output_dir", "label": "Output directory", "default": "./outputs"}, {"key": "workspace", "label": "Workspace", "default": "./.p2p-workspaces"}, {"key": "secret_key", "label": "Secret key (optional)", "default": ""}]))
                     if not values:
                         return
                     await asyncio.to_thread(_run_p2p_subcommand, argparse.Namespace(api_base=self.api_base, token=None, job_id=str(selected.get("id") or ""), repo_url=values["repo_url"], branch=values["branch"] or "main", docker_args=values["docker_args"], host_node_id=values["host_node_id"], output_dir=values["output_dir"] or "./outputs", workspace=values["workspace"] or "./.p2p-workspaces", secret_key=values["secret_key"] or None), "receiver")
                     self._log("Receiver run completed")
                 elif action_key == "switch_api":
-                    values = await self.push_screen_wait(FormScreen("Switch API Base", [{"key": "api_base", "label": "API base", "default": self.api_base, "required": True}]))
+                    values = await self._push_screen_result(FormScreen("Switch API Base", [{"key": "api_base", "label": "API base", "default": self.api_base, "required": True}]))
                     if not values:
                         return
                     self.api_base = _resolve_api_base(values["api_base"])
