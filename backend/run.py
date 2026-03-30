@@ -1,12 +1,15 @@
-from flask import Flask
+from fastapi import FastAPI
+from app.core.database import Base, engine
+from app.routes import auth
+from app.models import user
 
-app = Flask(__name__)
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI()
+
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 
 
-@app.route("/")
-def hello():
-    return "Hello from backend"
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+@app.get("/")
+def root():
+    return {"message": "Hello from FastAPI 🚀"}
