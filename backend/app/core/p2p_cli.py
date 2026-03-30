@@ -170,6 +170,24 @@ async def _accept_stream(endpoint: Any, alpn: bytes) -> Any:
     raise RuntimeError("Unable to accept iroh stream from endpoint; no compatible accept/listen API found")
 
 
+def _has_incoming_api(endpoint: Any) -> bool:
+    incoming_names = {
+        "accept",
+        "accept_bi",
+        "accept_stream",
+        "accept_bidirectional",
+        "accept_connection",
+        "accept_conn",
+        "incoming",
+        "listen",
+    }
+    for variant in _endpoint_variants(endpoint):
+        for name in incoming_names:
+            if callable(getattr(variant, name, None)):
+                return True
+    return False
+
+
 async def _connect_stream(endpoint: Any, node_id: str, alpn: bytes) -> Any:
     for variant in _endpoint_variants(endpoint):
         try:
@@ -227,6 +245,13 @@ async def run_host(args):
 
     if node.endpoint is None:
         raise RuntimeError("iroh endpoint not initialized")
+
+    if not _has_incoming_api(node.endpoint):
+        raise RuntimeError(
+            "Installed iroh bindings do not expose inbound stream APIs (accept/listen). "
+            "Use iroh==0.31.0 in both host and receiver environments, reinstall dependencies, "
+            "then run the dashboard commands again."
+        )
 
     stream = await _accept_stream(node.endpoint, node.alpn)
 
