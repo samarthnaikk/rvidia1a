@@ -269,6 +269,8 @@ def cmd_tui(args: argparse.Namespace) -> None:
         raise RuntimeError("Textual is not installed. Install dependencies with 'pip install -r backend/requirements.txt'.") from exc
 
     class FormScreen(ModalScreen):
+        BINDINGS = [("escape", "cancel", "Cancel")]
+
         CSS = """
         FormScreen {
             align: center middle;
@@ -305,6 +307,11 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     yield Button("Submit", id="form-submit", variant="success")
                     yield Button("Cancel", id="form-cancel", variant="default")
 
+        def on_mount(self) -> None:
+            if self.fields:
+                first_key = str(self.fields[0]["key"])
+                self.set_focus(self.query_one(f"#field-{first_key}", Input))
+
         def _collect_values(self):
             values: dict[str, str] = {}
             for field in self.fields:
@@ -329,7 +336,55 @@ def cmd_tui(args: argparse.Namespace) -> None:
             if values is not None:
                 self.dismiss(values)
 
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+    class AccessSourceScreen(ModalScreen):
+        BINDINGS = [("escape", "cancel", "Cancel")]
+
+        CSS = """
+        AccessSourceScreen {
+            align: center middle;
+            background: #020711 80%;
+        }
+        #source-box {
+            width: 62;
+            border: round #95f2bd;
+            background: #0b1322;
+            padding: 1 2;
+        }
+        .source-title { color: #95f2bd; text-style: bold; margin-bottom: 1; }
+        .source-subtitle { color: #b9cbbb; margin-bottom: 1; }
+        #source-actions { height: auto; }
+        Button { margin-right: 1; }
+        """
+
+        def compose(self):
+            with Vertical(id="source-box"):
+                yield Static("Access State Source", classes="source-title")
+                yield Static("Choose where to select the job from.", classes="source-subtitle")
+                with Horizontal(id="source-actions"):
+                    yield Button("My Jobs", id="source-my", variant="success")
+                    yield Button("Marketplace", id="source-market", variant="primary")
+                    yield Button("Cancel", id="source-cancel", variant="default")
+
+        def on_mount(self) -> None:
+            self.set_focus(self.query_one("#source-my", Button))
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "source-my":
+                self.dismiss("my")
+            elif event.button.id == "source-market":
+                self.dismiss("market")
+            else:
+                self.dismiss(None)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
     class JobPickerScreen(ModalScreen):
+        BINDINGS = [("escape", "cancel", "Cancel")]
+
         CSS = """
         JobPickerScreen {
             align: center middle;
@@ -369,17 +424,32 @@ def cmd_tui(args: argparse.Namespace) -> None:
         def on_mount(self) -> None:
             table = self.query_one("#picker-table", DataTable)
             table.cursor_type = "row"
+            table.zebra_stripes = True
             table.add_columns("No", "Job ID", "Status", "Access", "Repo/File")
             if not self.jobs:
                 table.add_row("-", "-", "-", "-", "No jobs")
+                self.set_focus(self.query_one("#picker-cancel", Button))
                 return
             for index, job in enumerate(self.jobs, start=1):
                 table.add_row(str(index), str(job.get("id") or ""), str(job.get("status") or "-"), str(job.get("access_status") or "-"), str(job.get("repo_url") or job.get("filename") or "-"))
+            self.set_focus(table)
+
+        def _highlighted_job(self):
+            if not self.jobs:
+                return None
+            table = self.query_one("#picker-table", DataTable)
+            row_index = int(table.cursor_row)
+            if 0 <= row_index < len(self.jobs):
+                return self.jobs[row_index]
+            return None
 
         def _selected_job(self):
             raw = self.query_one("#picker-input", Input).value.strip()
             if not raw:
-                self.query_one("#picker-error", Static).update("Type a row number or manual Job ID")
+                highlighted = self._highlighted_job()
+                if highlighted is not None:
+                    return highlighted
+                self.query_one("#picker-error", Static).update("Select a row, or type manual Job ID")
                 return None
             if raw.isdigit() and self.jobs:
                 idx = int(raw)
@@ -388,6 +458,11 @@ def cmd_tui(args: argparse.Namespace) -> None:
                 self.query_one("#picker-error", Static).update("Row number out of range")
                 return None
             return {"id": raw}
+
+        def on_data_table_row_selected(self, event) -> None:
+            row_index = int(event.cursor_row)
+            if 0 <= row_index < len(self.jobs):
+                self.dismiss(self.jobs[row_index])
 
         def on_button_pressed(self, event) -> None:
             if event.button.id == "picker-cancel":
@@ -401,6 +476,9 @@ def cmd_tui(args: argparse.Namespace) -> None:
             selected = self._selected_job()
             if selected is not None:
                 self.dismiss(selected)
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
 
     class RvidiaTextualApp(App):
         CSS = """
@@ -584,10 +662,10 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     self._log(f"Accepted access for job {job_id}", _api_request("POST", self.api_base, f"/p2p/jobs/{job_id}/accept-access", token=_resolve_token(None), payload={}))
                     await self.action_refresh()
                 elif action_key == "access_state":
-                    values = await self._push_screen_result(FormScreen("Access State Source", [{"key": "source", "label": "Type 'my' or 'market'", "default": "my", "required": True}]))
-                    if not values:
+                    source = await self._push_screen_result(AccessSourceScreen())
+                    if not source:
                         return
-                    selected = await self._pick_job("Pick job for access state", use_market=values["source"].strip().lower() == "market")
+                    selected = await self._pick_job("Pick job for access state", use_market=source == "market")
                     if not selected:
                         return
                     job_id = str(selected.get("id") or "")
