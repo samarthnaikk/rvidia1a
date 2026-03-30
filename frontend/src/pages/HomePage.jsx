@@ -1,7 +1,31 @@
+import { AnimatePresence, motion } from 'framer-motion'
+import { useEffect, useState } from 'react'
 import Navbar from '../components/Navbar'
 import atmosphereGlow from '../assets/imagee.png'
 
 function HomePage({ onLoginClick, onStartComputingClick }) {
+  const rotatingWords = ['Compute', 'GPUs', 'Training', 'Workload']
+  const [wordIndex, setWordIndex] = useState(0)
+
+  useEffect(() => {
+    let rotationInterval
+
+    const startDelayTimeout = setTimeout(() => {
+      setWordIndex((currentIndex) => (currentIndex + 1) % rotatingWords.length)
+
+      rotationInterval = setInterval(() => {
+        setWordIndex((currentIndex) => (currentIndex + 1) % rotatingWords.length)
+      }, 2200)
+    }, 600)
+
+    return () => {
+      clearTimeout(startDelayTimeout)
+      if (rotationInterval) {
+        clearInterval(rotationInterval)
+      }
+    }
+  }, [rotatingWords.length])
+
   return (
     <div
       className="relative min-h-screen w-full overflow-hidden"
@@ -20,7 +44,28 @@ function HomePage({ onLoginClick, onStartComputingClick }) {
             Power the Future of AI <br />
             With
             <br />
-            <span className="mt-11 inline-block whitespace-nowrap text-[#0EFE95] text-[96px]">Decentralized Compute</span>
+            <span className="mt-11 inline-flex items-baseline whitespace-nowrap text-[#0EFE95] text-[96px]">
+              Decentralized
+              <span className="ml-5 inline-flex min-w-[8.5ch] items-baseline justify-start align-baseline leading-[1]">
+                <AnimatePresence mode="wait">
+                  <motion.span
+                    key={rotatingWords[wordIndex]}
+                    className="inline-block align-baseline leading-[1]"
+                    initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -20, scale: 0.98 }}
+                    transition={{
+                      type: 'spring',
+                      mass: 1,
+                      stiffness: 177.8,
+                      damping: 20,
+                    }}
+                  >
+                    {rotatingWords[wordIndex]}
+                  </motion.span>
+                </AnimatePresence>
+              </span>
+            </span>
           </h1>
 
       <p className="mx-auto mt-32 max-w-[760px] text-center font-['Manrope'] text-[20px] font-normal text-[#B9CBBB] leading-[28px] tracking-[0px] text-slate-300/90 align-middle">
