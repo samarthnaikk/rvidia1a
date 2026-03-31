@@ -112,8 +112,13 @@ def _api_request(
     def _perform(url: str) -> tuple[str, str, str]:
         current_url = url
         max_redirects = 5
+        seen_urls: set[str] = set()
 
         for _ in range(max_redirects + 1):
+            if current_url in seen_urls:
+                raise RuntimeError(f"Too many redirects while calling API URL: {url}")
+            seen_urls.add(current_url)
+
             req = request.Request(url=current_url, method=method, headers=_headers(token), data=data)
             try:
                 with request.urlopen(req, timeout=30) as response:
@@ -123,7 +128,11 @@ def _api_request(
                 if exc.code in {301, 302, 303, 307, 308}:
                     location = exc.headers.get("Location")
                     if location:
-                        current_url = urljoin(current_url, location)
+                        next_url = urljoin(current_url, location)
+                        if next_url == current_url:
+                            # Some proxies redirect /jobs <-> /jobs/ via relative Location.
+                            next_url = f"{current_url}/" if not current_url.endswith("/") else current_url.rstrip("/")
+                        current_url = next_url
                         continue
                 raise
 
@@ -167,6 +176,15 @@ def _api_request(
                 parsed = {"detail": details}
             message = parsed.get("detail") if isinstance(parsed, dict) else details
             raise RuntimeError(f"API error {exc.code}: {message}") from exc
+    except RuntimeError as exc:
+        if "Too many redirects" in str(exc):
+            fallback_url = _build_api_url(api_base, path, with_api_prefix=True)
+            if fallback_url != url:
+                raw, content_type, used_url = _perform(fallback_url)
+            else:
+                raise
+        else:
+            raise
     except error.URLError as exc:
         raise RuntimeError(f"API connection error: {exc.reason}") from exc
 
