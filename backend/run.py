@@ -1,77 +1,83 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from app.core.database import Base, engine
 from app.models import job, p2p_signal, user
 from app.routes import auth, jobs, p2p
 
 
+_JOB_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("repo_url", "VARCHAR"),
+    ("branch", "VARCHAR NOT NULL DEFAULT 'main'"),
+    ("gpu_model", "VARCHAR"),
+    ("gpu_vram", "VARCHAR"),
+    ("gpu_driver", "VARCHAR"),
+    ("gpu_vram_mb", "INTEGER"),
+    ("cpu_model", "VARCHAR"),
+    ("cpu_physical_cores", "INTEGER"),
+    ("cpu_logical_cores", "INTEGER"),
+    ("cpu_max_clock_mhz", "INTEGER"),
+    ("memory_total_mb", "INTEGER"),
+    ("cpu_score", "DOUBLE PRECISION"),
+    ("gpu_score", "DOUBLE PRECISION"),
+    ("memory_score", "DOUBLE PRECISION"),
+    ("machine_score", "DOUBLE PRECISION"),
+    ("ranking_version", "VARCHAR"),
+    ("access_status", "VARCHAR NOT NULL DEFAULT 'open'"),
+    ("access_requested_by", "INTEGER"),
+    ("latest_host_node_id", "VARCHAR"),
+    ("latest_receiver_node_id", "VARCHAR"),
+    ("session_version", "INTEGER NOT NULL DEFAULT 1"),
+    ("artifact_state", "VARCHAR NOT NULL DEFAULT 'PENDING'"),
+    ("host_heartbeat_at", "TIMESTAMP"),
+    ("receiver_heartbeat_at", "TIMESTAMP"),
+    ("failover_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("last_failover_reason", "TEXT"),
+    ("checkpoint_phase", "VARCHAR"),
+    ("checkpoint_data", "TEXT"),
+    ("checkpoint_updated_at", "TIMESTAMP"),
+]
+
+
+def _table_columns(table_name: str) -> set[str]:
+    inspector = inspect(engine)
+    if not inspector.has_table(table_name):
+        return set()
+    return {column["name"] for column in inspector.get_columns(table_name)}
+
+
 def ensure_jobs_schema() -> None:
     """Patch missing columns for existing DBs when no migration tool is present."""
-    statements = [
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS repo_url VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS branch VARCHAR NOT NULL DEFAULT 'main'",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS gpu_model VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS gpu_vram VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS gpu_driver VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS gpu_vram_mb INTEGER",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cpu_model VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cpu_physical_cores INTEGER",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cpu_logical_cores INTEGER",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cpu_max_clock_mhz INTEGER",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS memory_total_mb INTEGER",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS cpu_score DOUBLE PRECISION",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS gpu_score DOUBLE PRECISION",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS memory_score DOUBLE PRECISION",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS machine_score DOUBLE PRECISION",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS ranking_version VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS access_status VARCHAR NOT NULL DEFAULT 'open'",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS access_requested_by INTEGER",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS latest_host_node_id VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS latest_receiver_node_id VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS artifact_state VARCHAR NOT NULL DEFAULT 'PENDING'",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS host_heartbeat_at TIMESTAMP",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS receiver_heartbeat_at TIMESTAMP",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS failover_count INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS last_failover_reason TEXT",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS checkpoint_phase VARCHAR",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS checkpoint_data TEXT",
-        "ALTER TABLE IF EXISTS jobs ADD COLUMN IF NOT EXISTS checkpoint_updated_at TIMESTAMP",
-        "UPDATE jobs SET branch = 'main' WHERE branch IS NULL",
-        "UPDATE jobs SET access_status = 'open' WHERE access_status IS NULL",
-        "UPDATE jobs SET session_version = 1 WHERE session_version IS NULL",
-        "UPDATE jobs SET failover_count = 0 WHERE failover_count IS NULL",
-        "UPDATE jobs SET artifact_state = 'PENDING' WHERE artifact_state IS NULL",
-    ]
+    existing_columns = _table_columns("jobs")
+    if not existing_columns:
+        return
+
     with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
+        for column_name, ddl in _JOB_COLUMN_MIGRATIONS:
+            if column_name not in existing_columns:
+                connection.execute(text(f"ALTER TABLE jobs ADD COLUMN {column_name} {ddl}"))
+
+        connection.execute(text("UPDATE jobs SET branch = 'main' WHERE branch IS NULL"))
+        connection.execute(text("UPDATE jobs SET access_status = 'open' WHERE access_status IS NULL"))
+        connection.execute(text("UPDATE jobs SET session_version = 1 WHERE session_version IS NULL"))
+        connection.execute(text("UPDATE jobs SET failover_count = 0 WHERE failover_count IS NULL"))
+        connection.execute(text("UPDATE jobs SET artifact_state = 'PENDING' WHERE artifact_state IS NULL"))
 
 
 def ensure_p2p_signals_schema() -> None:
-    """Bootstrap p2p_signals table for existing DBs that pre-date this model."""
-    statements = [
-        """
-        CREATE TABLE IF NOT EXISTS p2p_signals (
-            id VARCHAR PRIMARY KEY,
-            job_id VARCHAR NOT NULL,
-            from_node_id VARCHAR NOT NULL,
-            to_node_id VARCHAR NOT NULL,
-            signal_type VARCHAR NOT NULL,
-            payload TEXT NOT NULL,
-            delivered BOOLEAN NOT NULL DEFAULT FALSE,
-            delivered_at TIMESTAMP,
-            created_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-        """,
-        "CREATE INDEX IF NOT EXISTS ix_p2p_signals_job_id ON p2p_signals (job_id)",
-        "CREATE INDEX IF NOT EXISTS ix_p2p_signals_to_node_id ON p2p_signals (to_node_id)",
-    ]
+    """Ensure p2p_signals indexes exist for older databases."""
+    inspector = inspect(engine)
+    if not inspector.has_table("p2p_signals"):
+        return
+
+    existing_indexes = {index["name"] for index in inspector.get_indexes("p2p_signals")}
+
     with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
+        if "ix_p2p_signals_job_id" not in existing_indexes:
+            connection.execute(text("CREATE INDEX ix_p2p_signals_job_id ON p2p_signals (job_id)"))
+        if "ix_p2p_signals_to_node_id" not in existing_indexes:
+            connection.execute(text("CREATE INDEX ix_p2p_signals_to_node_id ON p2p_signals (to_node_id)"))
 
 
 Base.metadata.create_all(bind=engine)
