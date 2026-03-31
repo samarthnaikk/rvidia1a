@@ -318,6 +318,48 @@ def cmd_access_state(args: argparse.Namespace) -> None:
     _print(_api_request("GET", api_base, f"/p2p/jobs/{args.job_id}/access", token=token))
 
 
+def _resolve_receiver_launch_config(
+    api_base: str,
+    token: str,
+    job_id: str,
+    repo_url: str,
+    branch: str,
+    host_node_id: str,
+    auto: bool,
+) -> tuple[str, str, str]:
+    resolved_repo = (repo_url or "").strip()
+    resolved_branch = (branch or "main").strip() or "main"
+    resolved_host = (host_node_id or "").strip()
+
+    needs_lookup = auto or not resolved_repo
+    if not needs_lookup:
+        return resolved_repo, resolved_branch, resolved_host
+
+    access_payload = _api_request("GET", api_base, f"/p2p/jobs/{job_id}/access", token=token)
+    if not isinstance(access_payload, dict):
+        raise RuntimeError("Unable to resolve receiver config: invalid access payload")
+
+    if not resolved_repo:
+        resolved_repo = str(access_payload.get("repo_url") or "").strip()
+    payload_branch = str(access_payload.get("branch") or "").strip()
+    if payload_branch:
+        resolved_branch = payload_branch
+    if not resolved_host:
+        resolved_host = str(
+            access_payload.get("latest_host_node_id")
+            or access_payload.get("host_node_id")
+            or ""
+        ).strip()
+
+    if not resolved_repo:
+        raise RuntimeError(
+            "Unable to auto-resolve repo_url for receiver. "
+            "Pass --repo-url explicitly or ensure the job has repo metadata."
+        )
+
+    return resolved_repo, resolved_branch, resolved_host
+
+
 def _run_p2p_subcommand(args: argparse.Namespace, role: str) -> None:
     api_base = _resolve_api_base(args.api_base)
     token = _resolve_token(args.token)
@@ -344,9 +386,18 @@ def _run_p2p_subcommand(args: argparse.Namespace, role: str) -> None:
         if args.no_request_access:
             cmd += ["--no-request-access"]
     elif role == "receiver":
-        cmd += ["--repo-url", args.repo_url, "--branch", args.branch, "--output-dir", args.output_dir]
-        if args.host_node_id:
-            cmd += ["--host-node-id", args.host_node_id]
+        resolved_repo, resolved_branch, resolved_host = _resolve_receiver_launch_config(
+            api_base=api_base,
+            token=token,
+            job_id=args.job_id,
+            repo_url=getattr(args, "repo_url", ""),
+            branch=getattr(args, "branch", "main"),
+            host_node_id=getattr(args, "host_node_id", ""),
+            auto=bool(getattr(args, "auto", False)),
+        )
+        cmd += ["--repo-url", resolved_repo, "--branch", resolved_branch, "--output-dir", args.output_dir]
+        if resolved_host:
+            cmd += ["--host-node-id", resolved_host]
         if args.docker_args:
             cmd += ["--docker-args", args.docker_args]
 
@@ -914,10 +965,15 @@ def build_parser() -> argparse.ArgumentParser:
     p2p_receiver = sub.add_parser("p2p-receiver", help="Run receiver worker for a job")
     _add_connection_args(p2p_receiver)
     p2p_receiver.add_argument("--job-id", required=True)
-    p2p_receiver.add_argument("--repo-url", required=True)
+    p2p_receiver.add_argument("--repo-url", default="")
     p2p_receiver.add_argument("--branch", default="main")
     p2p_receiver.add_argument("--docker-args", default="")
     p2p_receiver.add_argument("--host-node-id", default="")
+    p2p_receiver.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-resolve repo/branch/host from backend access state for the provided job-id",
+    )
     p2p_receiver.add_argument("--output-dir", default="./outputs")
     p2p_receiver.add_argument("--workspace", default="./.p2p-workspaces")
     p2p_receiver.add_argument("--secret-key", default=None)
