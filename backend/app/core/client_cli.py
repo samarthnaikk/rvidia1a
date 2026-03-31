@@ -623,8 +623,10 @@ def cmd_tui(args: argparse.Namespace) -> None:
 
         async def action_refresh(self) -> None:
             try:
-                self.my_jobs = await asyncio.to_thread(self._get_jobs, False)
-                self.market_jobs = await asyncio.to_thread(self._get_market_jobs)
+                self.my_jobs, self.market_jobs = await asyncio.gather(
+                    asyncio.to_thread(self._get_jobs, False),
+                    asyncio.to_thread(self._get_market_jobs),
+                )
                 self._set_status()
                 self._render_jobs_table(self.my_jobs, "My Jobs")
                 self._log("Refreshed jobs and marketplace lists")
@@ -633,14 +635,31 @@ def cmd_tui(args: argparse.Namespace) -> None:
 
         def _set_status(self) -> None:
             user_text = "not logged in"
-            try:
-                me = _api_request("GET", self.api_base, "/auth/me", token=_resolve_token(None))
-                if isinstance(me, dict):
-                    user_text = f"{me.get('username', '-')} ({me.get('email', '-')})"
-            except RuntimeError:
-                pass
+            session = _load_session()
+            saved_user = session.get("user")
+            if isinstance(saved_user, dict):
+                user_text = f"{saved_user.get('username', '-')} ({saved_user.get('email', '-')})"
+            elif str(session.get("access_token") or "").strip():
+                user_text = "logged in"
             self.query_one("#status", Static).update(
                 f"API: {self.api_base} | User: {user_text} | My jobs: {len(self.my_jobs)} | Marketplace: {len(self.market_jobs)}"
+            )
+
+        async def _api_request_async(
+            self,
+            method: str,
+            path: str,
+            *,
+            token: str | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> Any:
+            return await asyncio.to_thread(
+                _api_request,
+                method,
+                self.api_base,
+                path,
+                token,
+                payload,
             )
 
         def _render_jobs_table(self, jobs: list[dict[str, Any]], title: str) -> None:
@@ -693,13 +712,13 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     values = await self._push_screen_result(FormScreen("Login", [{"key": "username_or_email", "label": "Username or email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}]))
                     if not values:
                         return
-                    payload = _api_request("POST", self.api_base, "/auth/login", payload=values)
+                    payload = await self._api_request_async("POST", "/auth/login", payload=values)
                     token = str(payload.get("access_token") or "")
                     if not token:
                         raise RuntimeError("Login succeeded but no access_token was returned")
                     session_payload = {"api_base": self.api_base, "access_token": token}
                     try:
-                        session_payload["user"] = _api_request("GET", self.api_base, "/auth/me", token=token)
+                        session_payload["user"] = await self._api_request_async("GET", "/auth/me", token=token)
                     except RuntimeError:
                         pass
                     _save_session(session_payload)
@@ -709,14 +728,14 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     values = await self._push_screen_result(FormScreen("Signup", [{"key": "username", "label": "Username", "required": True}, {"key": "email", "label": "Email", "required": True}, {"key": "password", "label": "Password", "password": True, "required": True}, {"key": "confirm_password", "label": "Confirm password", "password": True, "required": True}]))
                     if not values:
                         return
-                    self._log("Signup completed", _api_request("POST", self.api_base, "/auth/signup", payload=values))
+                    self._log("Signup completed", await self._api_request_async("POST", "/auth/signup", payload=values))
                 elif action_key == "whoami":
-                    self._log("Current user", _api_request("GET", self.api_base, "/auth/me", token=_resolve_token(None)))
+                    self._log("Current user", await self._api_request_async("GET", "/auth/me", token=_resolve_token(None)))
                 elif action_key == "create_job":
                     values = await self._push_screen_result(FormScreen("Create Job", [{"key": "repo_url", "label": "Repo URL", "required": True}, {"key": "branch", "label": "Branch", "default": "main"}, {"key": "command", "label": "Command (optional)", "default": ""}]))
                     if not values:
                         return
-                    self._log("Job created", _api_request("POST", self.api_base, "/jobs", token=_resolve_token(None), payload=values))
+                    self._log("Job created", await self._api_request_async("POST", "/jobs", token=_resolve_token(None), payload=values))
                     await self.action_refresh()
                 elif action_key == "list_jobs":
                     self._render_jobs_table(self.my_jobs, "My Jobs")
@@ -729,14 +748,20 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     if not selected:
                         return
                     job_id = str(selected.get("id") or "")
-                    self._log(f"Requested access for job {job_id}", _api_request("POST", self.api_base, f"/p2p/jobs/{job_id}/request-access", token=_resolve_token(None), payload={}))
+                    self._log(
+                        f"Requested access for job {job_id}",
+                        await self._api_request_async("POST", f"/p2p/jobs/{job_id}/request-access", token=_resolve_token(None), payload={}),
+                    )
                     await self.action_refresh()
                 elif action_key == "accept_access":
                     selected = await self._pick_job("Pick your job to accept access")
                     if not selected:
                         return
                     job_id = str(selected.get("id") or "")
-                    self._log(f"Accepted access for job {job_id}", _api_request("POST", self.api_base, f"/p2p/jobs/{job_id}/accept-access", token=_resolve_token(None), payload={}))
+                    self._log(
+                        f"Accepted access for job {job_id}",
+                        await self._api_request_async("POST", f"/p2p/jobs/{job_id}/accept-access", token=_resolve_token(None), payload={}),
+                    )
                     await self.action_refresh()
                 elif action_key == "access_state":
                     source = await self._push_screen_result(AccessSourceScreen())
@@ -746,7 +771,10 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     if not selected:
                         return
                     job_id = str(selected.get("id") or "")
-                    self._log(f"Access state for {job_id}", _api_request("GET", self.api_base, f"/p2p/jobs/{job_id}/access", token=_resolve_token(None)))
+                    self._log(
+                        f"Access state for {job_id}",
+                        await self._api_request_async("GET", f"/p2p/jobs/{job_id}/access", token=_resolve_token(None)),
+                    )
                 elif action_key == "p2p_host":
                     selected = await self._pick_job("Pick your job for host", open_only=True)
                     if not selected:
@@ -771,6 +799,10 @@ def cmd_tui(args: argparse.Namespace) -> None:
                     if not values:
                         return
                     self.api_base = _resolve_api_base(values["api_base"])
+                    session = _load_session()
+                    if session:
+                        session["api_base"] = self.api_base
+                        _save_session(session)
                     self._log(f"API base switched to {self.api_base}")
                     await self.action_refresh()
                 elif action_key == "logout":
