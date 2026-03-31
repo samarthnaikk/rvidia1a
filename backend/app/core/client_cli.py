@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_API_BASE = os.getenv("RVIDIA_API_BASE", "http://localhost:8000")
@@ -15,7 +16,33 @@ DEFAULT_SESSION_PATH = Path(os.getenv("RVIDIA_CLI_SESSION", "~/.rvidia-cli/sessi
 
 
 def _normalize_api_base(api_base: str) -> str:
-    return api_base.rstrip("/")
+    normalized = (api_base or "").strip().rstrip("/")
+    if not normalized:
+        return normalized
+
+    parsed = urlsplit(normalized)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+
+    if host in {"localhost", "127.0.0.1"} and port in {3000, 4173, 5173}:
+        corrected_netloc = f"{host}:8000"
+        corrected = urlunsplit((parsed.scheme or "http", corrected_netloc, parsed.path, parsed.query, parsed.fragment))
+        print(
+            f"[RVIDIA] --api-base '{normalized}' looks like a frontend dev server; "
+            f"using backend '{corrected.rstrip('/')}' instead.",
+            file=sys.stderr,
+        )
+        return corrected.rstrip("/")
+
+    return normalized
+
+
+def _build_api_url(api_base: str, path: str, with_api_prefix: bool = False) -> str:
+    base = _normalize_api_base(api_base)
+    if with_api_prefix and not base.endswith("/api"):
+        base = f"{base}/api"
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"{base}{normalized_path}"
 
 
 def _session_dir() -> Path:
@@ -82,25 +109,69 @@ def _api_request(
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
 
-    url = f"{_normalize_api_base(api_base)}{path if path.startswith('/') else '/' + path}"
-    req = request.Request(url=url, method=method, headers=_headers(token), data=data)
-
-    try:
+    def _perform(url: str) -> tuple[str, str]:
+        req = request.Request(url=url, method=method, headers=_headers(token), data=data)
         with request.urlopen(req, timeout=30) as response:
             raw = response.read().decode("utf-8", errors="replace")
-            if not raw:
-                return {}
-            return json.loads(raw)
+            return raw, response.headers.get("Content-Type", "")
+
+    url = _build_api_url(api_base, path, with_api_prefix=False)
+    used_url = url
+    content_type = ""
+
+    try:
+        raw, content_type = _perform(url)
     except error.HTTPError as exc:
-        details = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(details) if details else {}
-        except json.JSONDecodeError:
-            parsed = {"detail": details}
-        message = parsed.get("detail") if isinstance(parsed, dict) else details
-        raise RuntimeError(f"API error {exc.code}: {message}") from exc
+        if exc.code == 404:
+            fallback_url = _build_api_url(api_base, path, with_api_prefix=True)
+            if fallback_url != url:
+                try:
+                    used_url = fallback_url
+                    raw, content_type = _perform(fallback_url)
+                except error.HTTPError as fallback_exc:
+                    details = fallback_exc.read().decode("utf-8", errors="replace")
+                    try:
+                        parsed = json.loads(details) if details else {}
+                    except json.JSONDecodeError:
+                        parsed = {"detail": details}
+                    message = parsed.get("detail") if isinstance(parsed, dict) else details
+                    raise RuntimeError(f"API error {fallback_exc.code}: {message}") from fallback_exc
+                except error.URLError as fallback_exc:
+                    raise RuntimeError(f"API connection error: {fallback_exc.reason}") from fallback_exc
+            else:
+                details = exc.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(details) if details else {}
+                except json.JSONDecodeError:
+                    parsed = {"detail": details}
+                message = parsed.get("detail") if isinstance(parsed, dict) else details
+                raise RuntimeError(f"API error {exc.code}: {message}") from exc
+        else:
+            details = exc.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(details) if details else {}
+            except json.JSONDecodeError:
+                parsed = {"detail": details}
+            message = parsed.get("detail") if isinstance(parsed, dict) else details
+            raise RuntimeError(f"API error {exc.code}: {message}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"API connection error: {exc.reason}") from exc
+
+    if not raw:
+        return {}
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        compact = " ".join(raw.split())
+        snippet = compact[:220]
+        hint = ""
+        if "text/html" in content_type.lower() or raw.lstrip().startswith("<"):
+            hint = " Hint: this looks like an HTML page. Check --api-base points to backend (e.g. http://localhost:8000)."
+        raise RuntimeError(
+            f"API returned non-JSON response from {used_url} (Content-Type: {content_type or 'unknown'}). "
+            f"Body preview: {snippet!r}.{hint}"
+        ) from exc
 
 
 def _print(data: Any) -> None:
