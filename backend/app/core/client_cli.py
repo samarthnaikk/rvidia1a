@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 
 DEFAULT_API_BASE = os.getenv("RVIDIA_API_BASE", "http://localhost:8000")
@@ -109,25 +109,38 @@ def _api_request(
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
 
-    def _perform(url: str) -> tuple[str, str]:
-        req = request.Request(url=url, method=method, headers=_headers(token), data=data)
-        with request.urlopen(req, timeout=30) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            return raw, response.headers.get("Content-Type", "")
+    def _perform(url: str) -> tuple[str, str, str]:
+        current_url = url
+        max_redirects = 5
+
+        for _ in range(max_redirects + 1):
+            req = request.Request(url=current_url, method=method, headers=_headers(token), data=data)
+            try:
+                with request.urlopen(req, timeout=30) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                    return raw, response.headers.get("Content-Type", ""), current_url
+            except error.HTTPError as exc:
+                if exc.code in {301, 302, 303, 307, 308}:
+                    location = exc.headers.get("Location")
+                    if location:
+                        current_url = urljoin(current_url, location)
+                        continue
+                raise
+
+        raise RuntimeError(f"Too many redirects while calling API URL: {url}")
 
     url = _build_api_url(api_base, path, with_api_prefix=False)
     used_url = url
     content_type = ""
 
     try:
-        raw, content_type = _perform(url)
+        raw, content_type, used_url = _perform(url)
     except error.HTTPError as exc:
         if exc.code == 404:
             fallback_url = _build_api_url(api_base, path, with_api_prefix=True)
             if fallback_url != url:
                 try:
-                    used_url = fallback_url
-                    raw, content_type = _perform(fallback_url)
+                    raw, content_type, used_url = _perform(fallback_url)
                 except error.HTTPError as fallback_exc:
                     details = fallback_exc.read().decode("utf-8", errors="replace")
                     try:
