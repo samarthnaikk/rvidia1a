@@ -461,6 +461,18 @@ def _is_gpu_runtime_unavailable(stderr_or_logs: str) -> bool:
     return any(s in lowered for s in signals)
 
 
+def _is_docker_cli_unavailable(stderr_or_logs: str) -> bool:
+    """Return True when logs indicate Docker CLI is unavailable on the host OS."""
+    lowered = stderr_or_logs.lower()
+    signals = [
+        "the command 'docker' could not be found in this wsl 2 distro",
+        "docker: command not found",
+        "docker\' is not recognized as an internal or external command",
+        "cannot find the file specified",
+    ]
+    return any(s in lowered for s in signals)
+
+
 def _is_wsl() -> bool:
     """Return True when running inside Windows Subsystem for Linux."""
     if platform.system() != "Linux":
@@ -911,6 +923,13 @@ async def _host_execute_docker(
         print(f"[docker build] {line}")
     build_rc = await build_proc.wait()
     if build_rc != 0:
+        combined_build_logs = "\n".join(build_captured)
+        if _is_docker_cli_unavailable(combined_build_logs):
+            raise RuntimeError(
+                "docker build failed: Docker CLI is unavailable on this host. "
+                "If you are using WSL2, enable Docker Desktop WSL integration for this distro "
+                "or install and start Docker Engine in the current environment."
+            )
         raise RuntimeError(f"docker build failed (exit {build_rc}): {' '.join(build_captured[-5:])}")
 
     # 3. Docker run â€” GPU pass-through, /outputs volume, extra docker_args.
