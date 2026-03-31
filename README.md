@@ -48,7 +48,7 @@ Interactive mode (menu-driven, minimal typing):
 
 ```bash
 pip install -r backend/requirements.txt
-python -m app.core.client_cli tui --api-base http://localhost:8000
+python -m app.core.client_cli tui --api-base http://localhost:8000 (or the base url)
 ```
 
 TUI highlights:
