@@ -35,6 +35,18 @@ Services:
 3. Open dashboard and submit a job from "Submit GPU Job".
 4. View status and results from "View Job Status / Results".
 
+## Screenshots
+
+### Website and CLI Views
+
+![Rvidia Screenshot 1](./img1.png)
+
+![Rvidia Screenshot 2](./img2.png)
+
+![Rvidia Screenshot 3](./img3.png)
+
+![Rvidia Screenshot 4](./img4.png)
+
 ## CLI Flow (New)
 
 Use the backend CLI for the same core flow without the website UI.
@@ -151,3 +163,4 @@ Notes:
 - Job source is pulled from the provided public GitHub repository.
 - Output artifact return is P2P only.
 - Backend only stores coordination and final completion state.
+
